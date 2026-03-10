@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useParams, useLocation } from "wouter";
-import { ArrowLeft, Lock, Edit2, Save, X } from "lucide-react";
+import { ArrowLeft, Lock, Edit2, Save, X, Trash2 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/admin-layout";
 import { AuditLogTable } from "@/components/identity/audit-log-table";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useAdminAuth } from "@/hooks/use-admin-auth";
 import { queryClient } from "@/lib/queryClient";
@@ -128,6 +129,7 @@ export default function IdentityProfile() {
 
   const [editing, setEditing] = useState<EditableSection>(null);
   const [editData, setEditData] = useState<Record<string, string>>({});
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const { data, isLoading } = useQuery<{ identity: BefiterIdWithLinks }>({
     queryKey: ["/admin/identity", befiterId],
@@ -137,6 +139,25 @@ export default function IdentityProfile() {
       return res.json();
     },
     enabled: isAuthenticated && !!befiterId,
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/admin/identity/${befiterId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Delete failed");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/admin/identities"] });
+      toast({ title: "Identity deleted" });
+      setLocation("/admin/identities");
+    },
+    onError: (err: Error) => {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
   });
 
   const updateMutation = useMutation({
@@ -216,14 +237,27 @@ export default function IdentityProfile() {
   return (
     <AdminLayout title="Identity Profile" subtitle={identity.fullName}>
       <div className="space-y-4">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => setLocation("/admin/identities")} data-testid="button-back">
-            <ArrowLeft className="w-4 h-4 mr-1" /> Back
-          </Button>
-          <div className="flex items-center gap-2 ml-2">
-            <span className="text-xs text-muted-foreground font-mono" data-testid="text-befiter-id">{identity.id}</span>
-            <Badge variant="secondary" data-testid="badge-identity-tag">{identity.identityTag}</Badge>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Button variant="ghost" size="sm" onClick={() => setLocation("/admin/identities")} data-testid="button-back">
+              <ArrowLeft className="w-4 h-4 mr-1" /> Back
+            </Button>
+            <div className="flex items-center gap-2 ml-2">
+              <span className="text-xs text-muted-foreground font-mono" data-testid="text-befiter-id">{identity.id}</span>
+              <Badge variant="secondary" data-testid="badge-identity-tag">{identity.identityTag}</Badge>
+            </div>
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+            onClick={() => setShowDeleteConfirm(true)}
+            disabled={deleteMutation.isPending}
+            data-testid="button-delete-identity"
+          >
+            <Trash2 className="w-4 h-4 mr-1" />
+            {deleteMutation.isPending ? "Deleting..." : "Delete Identity"}
+          </Button>
         </div>
 
         <Tabs defaultValue="profile" data-testid="tabs-profile">
@@ -364,6 +398,30 @@ export default function IdentityProfile() {
           </TabsContent>
         </Tabs>
       </div>
+
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent data-testid="modal-confirm-delete-identity">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete BeFiter Identity?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete <strong>{identity.fullName}</strong>'s BeFiter ID, all linked app records, and their full audit history. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-cancel-delete-identity">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                deleteMutation.mutate();
+                setShowDeleteConfirm(false);
+              }}
+              data-testid="button-confirm-delete-identity"
+            >
+              Delete permanently
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </AdminLayout>
   );
 }

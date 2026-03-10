@@ -36,6 +36,7 @@ export interface IStorage {
   createApiKey(appName: string, keyHash: string, keyPrefix: string): Promise<ApiKey>;
   updateApiKeyStatus(id: string, isActive: boolean): Promise<ApiKey>;
   deleteApiKey(id: string): Promise<void>;
+  deleteIdentity(befiterId: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -263,6 +264,12 @@ export class DatabaseStorage implements IStorage {
 
   async deleteApiKey(id: string): Promise<void> {
     await db.delete(apiKeys).where(eq(apiKeys.id, id));
+  }
+
+  async deleteIdentity(befiterId: string): Promise<void> {
+    await db.delete(identityUpdates).where(eq(identityUpdates.befiterId, befiterId));
+    await db.delete(appLinks).where(eq(appLinks.befiterId, befiterId));
+    await db.delete(befiterIds).where(eq(befiterIds.id, befiterId));
   }
 }
 

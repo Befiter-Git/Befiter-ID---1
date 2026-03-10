@@ -88,6 +88,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.delete("/admin/identity/:befiterId", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      const existing = await storage.getIdentity(req.params.befiterId);
+      if (!existing) return res.status(404).json({ error: "Identity not found" });
+      await storage.deleteIdentity(req.params.befiterId);
+      return res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to delete identity" });
+    }
+  });
+
   app.get("/admin/audit/:befiterId", requireAdminSession, async (req: Request, res: Response) => {
     try {
       const log = await storage.getAuditLog(req.params.befiterId);
