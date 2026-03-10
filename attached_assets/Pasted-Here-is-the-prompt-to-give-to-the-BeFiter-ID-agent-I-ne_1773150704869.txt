@@ -1,0 +1,71 @@
+Here is the prompt to give to the BeFiter ID agent:
+
+I need you to make specific changes to how phone numbers are handled in the identity service. Read this carefully and implement exactly what is described.
+
+Change 1 — Phone column structure
+
+The befiter_ids table currently has one phone column with a UNIQUE constraint.
+
+Change it to:
+
+Rename phone to current_phone — this is the active phone number used for all communication and lookup
+Add a new column previous_phones as a text[] (text array) — this stores old phone numbers that this person previously used. Default is an empty array.
+Remove the UNIQUE constraint from current_phone — the same phone number can exist on multiple records because phone numbers can be recycled by telecom operators
+Change 2 — Create endpoint
+
+Currently the create endpoint checks for duplicate phone and returns 409 if found.
+
+Change it to:
+
+Only check for duplicate current_phone match — do NOT return 409 if phone already exists. Allow it and create the new identity.
+Still check for duplicate email and return 409 if email already exists — email remains unique and is enforced at database level
+Change 3 — Lookup endpoint
+
+Currently the lookup searches phone first, then email.
+
+Keep it exactly the same BUT only search current_phone column — never search previous_phones.
+
+Change 4 — Create endpoint duplicate handling (Case 2)
+
+This is the most important change. When a new identity create is attempted:
+
+Step 1: Check if email already exists in befiter_ids
+
+If email EXISTS (same email, any phone):
+
+Do NOT create a new record
+This is the same person
+Compare the phone in the request with current_phone on the existing record
+If phone is different:
+Move the existing current_phone into the previous_phones array
+Set the new phone as current_phone
+Return the existing identity record
+Create an app_link for the calling app
+Return 200 (not 201, since nothing new was created)
+If email does NOT exist:
+
+Create a new identity record normally
+Return 201
+Change 5 — The four duplicate scenarios — confirm your logic handles all of them
+
+Email	Phone	What should happen
+Same	Same	Return existing, link app. No changes to profile.
+Same	Different	Return existing, move old phone to previous_phones, set new phone as current_phone, link app.
+Different	Same	Create new identity. Phone being same is acceptable.
+Different	Different	Create new identity.
+Change 6 — Update the lookup response
+
+When lookup returns a found identity, include previous_phones in the response so calling apps can see the full phone history.
+
+Change 7 — Admin profile view
+
+On the identity profile page in the admin dashboard, show previous_phones as a read-only list under the Core Identity section, labelled "Previous Phone Numbers".
+
+After making all these changes, run these four test cases and show me the actual responses:
+
+Test 1 — Create identity with email test1@befiter.com, phone 9876543210
+Test 2 — Create again with same email test1@befiter.com, same phone 9876543210 → should return existing record, 200
+Test 3 — Create again with same email test1@befiter.com, different phone 8888888888 → should return existing record, 200, and move +919876543210 to previous_phones, set +918888888888 as current_phone
+Test 4 — Create with different email test2@befiter.com, same phone 9876543210 → should create NEW identity, 201
+
+Show me the full response for each test.
