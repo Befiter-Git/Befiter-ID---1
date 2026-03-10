@@ -1,16 +1,277 @@
-import type { Express } from "express";
+import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
+import bcrypt from "bcryptjs";
+import { randomBytes } from "crypto";
 import { storage } from "./storage";
+import { apiKeyAuth } from "./auth";
+import { requireAdminSession, sessionMiddleware } from "./admin-auth";
+import { apiRateLimiter } from "./rate-limit";
+import { normalisePhone } from "./phone-utils";
+import { insertBefiterIdSchema, updateBefiterIdSchema } from "@shared/schema";
+import { z } from "zod";
 
-export async function registerRoutes(
-  httpServer: Server,
-  app: Express
-): Promise<Server> {
-  // put application routes here
-  // prefix all routes with /api
+export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+  app.use(sessionMiddleware);
 
-  // use storage to perform CRUD operations on the storage interface
-  // e.g. storage.insertUser(user) or storage.getUserByUsername(username)
+  // ─── Admin Auth Routes ────────────────────────────────────────────────────
+
+  app.post("/admin/login", async (req: Request, res: Response) => {
+    const { username, password } = req.body;
+    const adminUsername = process.env.ADMIN_USERNAME || "admin";
+    const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
+
+    if (username === adminUsername && password === adminPassword) {
+      req.session.adminLoggedIn = true;
+      req.session.adminUsername = username;
+      return res.json({ success: true });
+    }
+    return res.status(401).json({ error: "Invalid username or password" });
+  });
+
+  app.post("/admin/logout", (req: Request, res: Response) => {
+    req.session.destroy(() => {
+      res.json({ success: true });
+    });
+  });
+
+  app.get("/admin/me", (req: Request, res: Response) => {
+    if (req.session?.adminLoggedIn) {
+      return res.json({ loggedIn: true, username: req.session.adminUsername });
+    }
+    return res.status(401).json({ loggedIn: false });
+  });
+
+  // ─── Admin Data Routes ────────────────────────────────────────────────────
+
+  app.get("/admin/stats", requireAdminSession, async (_req: Request, res: Response) => {
+    try {
+      const stats = await storage.getDashboardStats();
+      return res.json(stats);
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to fetch stats" });
+    }
+  });
+
+  app.get("/admin/identities", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      const query = (req.query.q as string) || "";
+      const page = parseInt((req.query.page as string) || "1", 10);
+      const limit = parseInt((req.query.limit as string) || "50", 10);
+      const result = await storage.searchIdentities(query, page, limit);
+      return res.json(result);
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to search identities" });
+    }
+  });
+
+  app.get("/admin/identity/:befiterId", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      const identity = await storage.getIdentity(req.params.befiterId);
+      if (!identity) return res.status(404).json({ error: "Identity not found" });
+      return res.json({ identity });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to fetch identity" });
+    }
+  });
+
+  app.put("/admin/identity/:befiterId", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      const existing = await storage.getIdentity(req.params.befiterId);
+      if (!existing) return res.status(404).json({ error: "Identity not found" });
+      const updated = await storage.adminUpdateIdentity(req.params.befiterId, req.body);
+      return res.json({ identity: updated });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to update identity" });
+    }
+  });
+
+  app.get("/admin/audit/:befiterId", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      const log = await storage.getAuditLog(req.params.befiterId);
+      return res.json({ log });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to fetch audit log" });
+    }
+  });
+
+  app.get("/admin/api-keys", requireAdminSession, async (_req: Request, res: Response) => {
+    try {
+      const keys = await storage.getAllApiKeys();
+      return res.json({ keys });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to fetch API keys" });
+    }
+  });
+
+  app.post("/admin/api-keys", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      const { appName } = req.body;
+      if (!appName || typeof appName !== "string" || !appName.trim()) {
+        return res.status(400).json({ error: "appName is required" });
+      }
+
+      const rawKey = "befiter_" + randomBytes(24).toString("base64url").slice(0, 24);
+      const keyPrefix = rawKey.slice(0, 10);
+      const keyHash = await bcrypt.hash(rawKey, 10);
+
+      const key = await storage.createApiKey(appName.trim(), keyHash, keyPrefix);
+      const { keyHash: _, ...keyWithoutHash } = key;
+
+      return res.status(201).json({ key: keyWithoutHash, rawKey });
+    } catch (err: any) {
+      if (err?.code === "23505") {
+        return res.status(409).json({ error: "An API key for this app already exists" });
+      }
+      console.error(err);
+      return res.status(500).json({ error: "Failed to create API key" });
+    }
+  });
+
+  app.patch("/admin/api-keys/:id", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      const { isActive } = req.body;
+      if (typeof isActive !== "boolean") {
+        return res.status(400).json({ error: "isActive (boolean) is required" });
+      }
+      const updated = await storage.updateApiKeyStatus(req.params.id, isActive);
+      const { keyHash: _, ...keyWithoutHash } = updated;
+      return res.json({ key: keyWithoutHash });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to update API key" });
+    }
+  });
+
+  // ─── Public API Identity Routes ───────────────────────────────────────────
+
+  app.get("/api/identity/lookup", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const { phone, email } = req.query as { phone?: string; email?: string };
+
+      if (!phone && !email) {
+        return res.status(400).json({ error: "At least one of phone or email is required" });
+      }
+
+      let identity = undefined;
+
+      if (phone) {
+        const normalised = normalisePhone(phone);
+        identity = await storage.lookupByPhone(normalised);
+      }
+
+      if (!identity && email) {
+        identity = await storage.lookupByEmail(email);
+      }
+
+      if (identity) {
+        await storage.incrementDuplicatePrevention();
+        return res.json({ found: true, identity });
+      }
+
+      return res.json({ found: false });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Lookup failed" });
+    }
+  });
+
+  app.post("/api/identity/create", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const parseResult = insertBefiterIdSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
+      }
+
+      const data = parseResult.data;
+      data.phone = normalisePhone(data.phone);
+
+      const existingByPhone = await storage.lookupByPhone(data.phone);
+      if (existingByPhone) {
+        return res.status(409).json({ error: "Identity already exists with this phone number" });
+      }
+
+      const existingByEmail = await storage.lookupByEmail(data.email);
+      if (existingByEmail) {
+        return res.status(409).json({ error: "Identity already exists with this email address" });
+      }
+
+      const { appUserId } = req.body;
+      if (!appUserId) {
+        return res.status(400).json({ error: "appUserId is required" });
+      }
+
+      const identity = await storage.createIdentity(data, req.appName!, appUserId);
+      return res.status(201).json({ identity });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to create identity" });
+    }
+  });
+
+  app.put("/api/identity/:befiterId", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const existing = await storage.getIdentity(req.params.befiterId);
+      if (!existing) return res.status(404).json({ error: "Identity not found" });
+
+      const body = { ...req.body };
+      delete body.phone;
+      delete body.email;
+      delete body.id;
+      delete body.createdAt;
+      delete body.identityTag;
+
+      const parseResult = updateBefiterIdSchema.safeParse(body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
+      }
+
+      const updated = await storage.updateIdentity(req.params.befiterId, parseResult.data, req.appName!);
+      return res.json({ identity: updated });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to update identity" });
+    }
+  });
+
+  app.post("/api/identity/:befiterId/link", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const existing = await storage.getIdentity(req.params.befiterId);
+      if (!existing) return res.status(404).json({ error: "Identity not found" });
+
+      const { appUserId } = req.body;
+      if (!appUserId) {
+        return res.status(400).json({ error: "appUserId is required" });
+      }
+
+      const alreadyLinked = existing.appLinks.find(l => l.appName === req.appName);
+      if (alreadyLinked) {
+        return res.status(409).json({ error: "This app is already linked to this identity" });
+      }
+
+      const link = await storage.linkApp(req.params.befiterId, req.appName!, appUserId);
+      return res.status(201).json({ link });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to link app" });
+    }
+  });
+
+  app.get("/api/identity/:befiterId", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const identity = await storage.getIdentity(req.params.befiterId);
+      if (!identity) return res.status(404).json({ error: "Identity not found" });
+      return res.json({ identity });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to fetch identity" });
+    }
+  });
 
   return httpServer;
 }
