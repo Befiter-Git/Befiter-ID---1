@@ -1,0 +1,111 @@
+Here is the audit prompt to give to the BeFiter ID agent:
+
+I need you to do a full audit of everything you built. Do not go by memory. Check the actual files, actual database, and actual running code. For every item below, test it and report exactly what you find.
+
+AUDIT 1 — Database Tables
+
+Run a query to list all tables and their columns. Confirm:
+
+befiter_ids exists with exactly these columns: id, full_name, phone, email, date_of_birth, gender, profile_photo, country, state, city, pincode, locality, occupation, marital_status, emergency_contact_name, emergency_contact_phone, language_preference, height, weight, blood_group, fitness_goals, medical_history, identity_tag, created_at, updated_at
+app_links exists with: id, befiter_id (must be this exact name, not befiter_id_id), app_name, app_user_id, linked_at
+api_keys exists with: id, app_name, key_hash, key_prefix, is_active, created_at
+identity_updates exists with: id, befiter_id, app_name, field_changed, old_value, new_value, changed_at
+stats exists with: key, value columns (for duplicate prevention counter)
+Report any missing table, missing column, or wrong column name.
+
+AUDIT 2 — Phone Normalisation
+
+Open server/phone-utils.ts. Show me the actual code. Then tell me what these inputs produce:
+
+Input: 9876543210 → Expected output: +919876543210
+Input: 09876543210 → Expected output: +919876543210
+Input: +919876543210 → Expected output: +919876543210
+Is normalisePhone called in the create route before inserting? Is it called in the update route before updating?
+
+AUDIT 3 — API Key Validation
+
+Open server/auth.ts. Show me the actual validation logic. Confirm:
+
+Does it use keyPrefix to filter first, then bcrypt.compare only the matching record?
+Or does it loop through all keys and bcrypt.compare each one? (This is wrong — flag it if so)
+Does a missing key return 401?
+Does an inactive key return 401?
+AUDIT 4 — Lookup Endpoint
+
+Open the lookup route in server/routes.ts. Confirm:
+
+Does it search by phone FIRST?
+Only if phone not found, does it then search by email?
+When a record is found, does it increment the duplicate_prevention_count in the stats table?
+Does it return { found: false } when nothing is found?
+AUDIT 5 — Create Endpoint
+
+Open the create route. Confirm:
+
+Does it normalise phone before inserting?
+Does it check for duplicate phone → return 409 if exists?
+Does it check for duplicate email → return 409 if exists?
+Does it create an app_links row automatically after creating the identity?
+Is identity_tag set to "member" and is it excluded from the request body (cannot be set by caller)?
+AUDIT 6 — Update Endpoint
+
+Open the update route. Confirm:
+
+Are phone and email explicitly removed from the update body before processing?
+Is identity_tag also excluded from updates?
+For a request that changes 3 fields, are exactly 3 rows written to identity_updates?
+Does each audit row contain: befiter_id, app_name, field_changed, old_value, new_value, changed_at?
+AUDIT 7 — Rate Limiting
+
+Open server/rate-limit.ts. Confirm:
+
+Is the rate limit applied per API key (not per IP)?
+Is the limit set to 100 requests per minute?
+Does it return 429 with a retryAfter value when exceeded?
+AUDIT 8 — Admin Dashboard
+
+Check each page exists and works:
+
+/admin/login — does it read credentials from ADMIN_USERNAME and ADMIN_PASSWORD env vars?
+/admin/dashboard — does it show total IDs, IDs this month, app breakdown, and duplicate prevention count from the stats table?
+/admin/identities — does search work by name, phone, and email?
+/admin/identity/:id — does it show all 5 sections? Does the audit history tab show identity_updates rows for that person?
+/admin/api-keys — does Generate Key show the raw key once only with a copy button? Does activate/deactivate work?
+AUDIT 9 — Environment Variables
+
+Confirm these four are used in the code and not hardcoded:
+
+DATABASE_URL
+ADMIN_USERNAME
+ADMIN_PASSWORD
+SESSION_SECRET
+AUDIT 10 — Start the Application
+
+Start the server. Confirm it starts without errors. Show me the startup log.
+
+Then make one real test call:
+
+Generate an API key from the admin dashboard
+Use that key to call: POST /api/identity/create with { fullName: "Test User", phone: "9876543210", email: "test@befiter.com" }
+Show me the exact response
+Then call: GET /api/identity/lookup?phone=9876543210
+Show me the exact response
+Confirm the stats table now has duplicate_prevention_count = 1
+Report Format
+
+For every audit item respond as:
+
+AUDIT 1 — Database Tables
+  befiter_ids: PASS — all 25 columns present
+  app_links: FAIL — column is named befiter_id_id instead of befiter_id
+  api_keys: PASS
+  identity_updates: PASS
+  stats table: FAIL — table does not exist
+AUDIT 2 — Phone Normalisation
+  Code found: YES
+  9876543210 → +919876543210: PASS
+  09876543210 → +919876543210: PASS
+  +919876543210 → +919876543210: PASS
+  Called in create route: PASS
+  Called in update route: FAIL — not called
+Go through all 10 audits. Show me every PASS and every FAIL. Do not skip anything.
