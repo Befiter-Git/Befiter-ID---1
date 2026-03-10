@@ -1,0 +1,363 @@
+BeFiter ID Service — Complete Build Instructions
+What You Are Building
+You are building the BeFiter ID Service — a centralised identity platform for the entire BeFiter ecosystem. This is a standalone backend API service with a minimal admin interface. It is the single source of truth for every person across all BeFiter products (befiter.store, befiter.com, and any future BeFiter product).
+
+This is NOT a full user-facing app. It is a backend service with:
+
+A REST API consumed by other BeFiter apps
+A simple admin dashboard to view and search identities
+A PostgreSQL database
+The Core Concept — Understand This First
+There are two types of people in the BeFiter ecosystem:
+
+BeFiter Member (Service Taker)
+A person who consumes fitness services for themselves.
+
+befiter.store: any person enrolled as a gym member (regardless of active/inactive/expired status)
+befiter.com: any person who signed up with the "Active User" role
+These people ARE stored in BeFiter ID. They get seamless cross-app access.
+
+BeFiter Partner (Service Giver)
+A person who provides or manages fitness services.
+
+befiter.store: staff, gym owners, leads, vendors
+befiter.com: Professional, Venue Owner, Seller
+These people are NOT stored in BeFiter ID. They are managed entirely within their respective app. BeFiter ID has nothing to do with them.
+
+The Login Flow Every BeFiter App Must Follow
+Person enters email or phone on any BeFiter app
+OTP sent and verified by that app
+That app calls BeFiter ID to check if person exists
+RESULT A — Found in BeFiter ID (they are a BeFiter Member):
+  → If only Member account: direct login, no friction
+  → If also has Partner account in this app: show choice screen
+      "Continue as Member" → direct login
+      "Continue as Partner" → pre-filled signup, they create partner account
+RESULT B — Not found in BeFiter ID (they are a Partner):
+  → This app handles their signup independently
+  → BeFiter ID not involved further
+Tech Stack
+Runtime: Node.js with TypeScript
+Framework: Express.js
+Database: PostgreSQL (use Replit's built-in PostgreSQL)
+ORM: Drizzle ORM with drizzle-zod
+Frontend: React with Vite (admin dashboard only)
+Styling: Tailwind CSS with shadcn/ui components
+Auth: API key authentication for app-to-app calls
+Rate limiting: express-rate-limit per API key
+Database Schema
+Table 1: befiter_ids
+One row per person. Primary identity record.
+
+export const befiterIds = pgTable("befiter_ids", {
+  id: varchar("id", { length: 50 }).primaryKey().$defaultFn(() => generateUUID()),
+  // Core Identity
+  fullName: text("full_name").notNull(),
+  phone: text("phone").notNull().unique(),   // always stored in E.164 format e.g. +919876543210
+  email: text("email").notNull().unique(),
+  dateOfBirth: date("date_of_birth"),
+  gender: text("gender"),
+  profilePhoto: text("profile_photo"),       // store as URL, never base64
+  // Address
+  country: text("country"),
+  state: text("state"),
+  city: text("city"),
+  pincode: text("pincode"),
+  locality: text("locality"),
+  // Personal Details
+  occupation: text("occupation"),
+  maritalStatus: text("marital_status"),
+  emergencyContactName: text("emergency_contact_name"),
+  emergencyContactPhone: text("emergency_contact_phone"),
+  languagePreference: text("language_preference").default("en"),
+  // Health Profile
+  height: numeric("height"),
+  weight: numeric("weight"),
+  bloodGroup: text("blood_group"),
+  fitnessGoals: text("fitness_goals").array(),
+  medicalHistory: text("medical_history"),
+  // Identity Tag — always "member" for every record in this table
+  identityTag: text("identity_tag").default("member"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+Table 2: app_links
+Records which BeFiter apps know about this person and their ID in that app.
+
+export const appLinks = pgTable("app_links", {
+  id: varchar("id", { length: 50 }).primaryKey().$defaultFn(() => generateUUID()),
+  befiterId: varchar("befiter_id", { length: 50 }).notNull().references(() => befiterIds.id),
+  appName: text("app_name").notNull(),       // free text — any value allowed e.g. "befiter_store", "befiter_com", "befiter_live", "befiter_ai" etc.
+  appUserId: text("app_user_id").notNull(),  // the person's ID in that specific app
+  linkedAt: timestamp("linked_at").defaultNow(),
+});
+Table 3: api_keys
+One key per connected BeFiter app.
+
+export const apiKeys = pgTable("api_keys", {
+  id: varchar("id", { length: 50 }).primaryKey().$defaultFn(() => generateUUID()),
+  appName: text("app_name").notNull().unique(),
+  keyHash: text("key_hash").notNull(),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+Table 4: identity_updates — Audit Log
+Every change to any identity record is logged here.
+
+export const identityUpdates = pgTable("identity_updates", {
+  id: varchar("id", { length: 50 }).primaryKey().$defaultFn(() => generateUUID()),
+  befiterId: varchar("befiter_id", { length: 50 }).notNull().references(() => befiterIds.id),
+  appName: text("app_name").notNull(),       // which app made the change
+  fieldChanged: text("field_changed").notNull(), // name of the field that was updated
+  oldValue: text("old_value"),               // previous value (store as string)
+  newValue: text("new_value"),               // new value (store as string)
+  changedAt: timestamp("changed_at").defaultNow(),
+});
+Phone Number Normalisation — Critical
+Before storing any phone number (on create or update), always normalise to E.164 format.
+
+E.164 format: +[country_code][number]
+Examples:
+
+9876543210 → +919876543210
+09876543210 → +919876543210
++919876543210 → +919876543210 (already correct)
+Default country code: +91 (India) if no country code is provided.
+
+Write a normalisePhone(phone: string): string utility function and call it in every create and update operation before touching the database.
+
+If two different formats of the same number are submitted, they must resolve to the same E.164 string, preventing silent duplicates.
+
+API Endpoints
+All endpoints require the header: x-api-key: <app_api_key>
+
+Rate limit: 100 requests per minute per API key. Return 429 if exceeded.
+
+1. Lookup identity
+GET /api/identity/lookup?email=&phone=
+Logic — phone takes priority:
+
+If phone provided → normalise it → search by phone
+If not found by phone AND email provided → search by email
+If found → return full identity record
+If not found → return { found: false }
+Also increment a lookups_that_prevented_duplicates counter when a record IS found (used for dashboard stat).
+
+2. Create identity
+POST /api/identity/create
+Body: identity fields (fullName, phone, email required minimum)
+
+Normalise phone before storing
+Check for existing record by phone first, then email — reject with 409 if already exists
+Create identity record
+Create app_link for the calling app
+Return created identity with its BeFiter ID
+3. Update identity
+PUT /api/identity/:befiterId
+Body: any fields to update (partial update)
+
+Normalise phone if phone is in the body
+For every field being updated: write a row to identity_updates table with old value, new value, field name, app name, timestamp
+Apply the update
+Return updated identity
+4. Link app
+POST /api/identity/:befiterId/link
+Body: { appUserId: string }
+
+Links the calling app to an existing identity
+Creates a row in app_links
+Used when person already exists in BeFiter ID and a new app is connecting them
+5. Fetch full identity
+GET /api/identity/:befiterId
+Returns full identity record including all app_links.
+
+Business Logic Rules
+Rule 1 — Always lookup before create
+Every app must call lookup first. Never call create without a prior lookup returning { found: false }.
+
+Rule 2 — Phone is the primary identifier, email is secondary
+Always search phone first. Phone is stronger and less likely to change.
+
+Rule 3 — Phone and email are unique and immutable via API
+Once set, no app can change these fields. They are excluded from the PUT update endpoint entirely. Only an admin can change them through the dashboard.
+
+Rule 4 — Phone always stored in E.164 format
+No exceptions. Normalise on every write.
+
+Rule 5 — identityTag is always "member"
+Every record in this database is a BeFiter Member by definition. The tag never changes. Partners are never sent to this service.
+
+Rule 6 — app_name is free text — never hardcoded
+Any BeFiter product can connect. Do not validate or restrict app_name values.
+
+Rule 7 — Partial updates are safe
+Only fields present in the request body are updated. Missing fields are left unchanged.
+
+Rule 8 — Every field change is logged in identity_updates
+No exceptions. This is the audit trail.
+
+Admin Dashboard
+Build a simple, clean admin interface with its own session-based login (separate from the API key system).
+
+Page 1 — Dashboard
+
+Total BeFiter IDs
+IDs created this month
+App links breakdown (count per app_name)
+Duplicate prevention count (number of lookups that returned an existing record instead of creating a new one)
+Page 2 — Identity Search
+
+Search by name, phone, or email
+Results show: name, phone, email, apps linked, created date
+Click any row to view full profile
+Page 3 — Full Identity Profile View
+
+All five sections: Core Identity, Address, Personal Details, Health Profile, App Links
+Edit button for all fields except phone and email
+Audit history tab showing all changes from identity_updates for this person
+Page 4 — API Keys Management
+
+List all API keys with app name, status, created date
+Generate new key — show raw key ONCE at generation, never again
+Deactivate / reactivate key
+Never expose the raw key after the initial creation response
+Security
+All API endpoints validate x-api-key header against the api_keys table using hashed comparison
+Invalid, missing, or inactive key → return 401
+Rate limit: 100 requests per minute per API key using express-rate-limit
+Admin dashboard uses separate session-based auth (username + password from environment variables)
+Never return hashed keys or raw keys in any API response after creation
+Environment Variables Required
+DATABASE_URL         — PostgreSQL connection string
+ADMIN_USERNAME       — Admin dashboard login username
+ADMIN_PASSWORD       — Admin dashboard login password
+SESSION_SECRET       — Secret for admin session cookies
+Project File Structure
+server/
+  index.ts              — Express app entry point
+  routes.ts             — All API route definitions
+  storage.ts            — Database access layer
+  auth.ts               — API key validation middleware
+  admin-auth.ts         — Admin session authentication
+  rate-limit.ts         — Rate limiting setup per API key
+  phone-utils.ts        — normalisePhone() utility function
+shared/
+  schema.ts             — Drizzle schema for all four tables
+client/src/
+  App.tsx               — Admin dashboard router
+  pages/
+    dashboard.tsx       — Stats overview
+    identities.tsx      — Search and list
+    identity-profile.tsx — Full profile + audit history
+    api-keys.tsx        — Key management
+    admin-login.tsx     — Admin login page
+  components/           — Shared UI components
+Integration Reference for Connected Apps
+When befiter.store enrolls a new gym member:
+
+1. Normalise phone → GET /api/identity/lookup?phone=+91...
+2. Found → POST /api/identity/:befiterId/link  { appUserId: member.id }
+3. Not found → POST /api/identity/create  { fullName, phone, email, ... }
+4. Store returned befiterId on the member record in befiter.store
+When befiter.com Active User completes signup:
+
+Same four steps as above
+When any app needs full profile + app-specific data:
+
+Call 1 → GET /api/identity/:befiterId      → profile data
+Call 2 → GET that app's own API            → latest app-specific data
+These are always two separate calls. BeFiter ID never returns app-specific data.
+What NOT to Build
+No end-user login or registration UI
+No OTP or password system for end users — authentication is each app's job
+No role management — roles stay in each app
+No membership or subscription data — that is befiter.store's job
+No activity or workout tracking — that is befiter.com's job
+Do not hardcode or validate app_name values — keep it open for future apps
+This is the complete specification. Build exactly this. Keep it simple, keep it clean. This service does one job: know who every BeFiter Member is, prevent duplicates, store their profile, serve it to any app that asks.
+
+i gave the prompt to new agent its telling its done , now to check everything is done make a prompt for the agent to check and report
+
+Here is the verification prompt to give to the BeFiter ID agent:
+
+BeFiter ID Service — Verification and Report
+You have just built the BeFiter ID Service. I need you to check every single item below and give me a full report. For each item, tell me: Done / Not Done / Partially Done and what you actually see.
+
+1. Database — Check All Four Tables Exist
+Check the database and confirm these exact tables exist with the correct columns:
+
+befiter_ids — check these columns exist: id, full_name, phone, email, date_of_birth, gender, profile_photo, country, state, city, pincode, locality, occupation, marital_status, emergency_contact_name, emergency_contact_phone, language_preference, height, weight, blood_group, fitness_goals, medical_history, identity_tag, created_at, updated_at
+
+app_links — check these columns exist: id, befiter_id (NOT befiter_id_id), app_name, app_user_id, linked_at
+
+api_keys — check these columns exist: id, app_name, key_hash, is_active, created_at
+
+identity_updates — check these columns exist: id, befiter_id, app_name, field_changed, old_value, new_value, changed_at
+
+2. Phone Normalisation — Check the Utility
+Does a normalisePhone() function exist?
+Does it handle all three formats: 9876543210, 09876543210, +919876543210?
+Is it called in both the create AND update routes before writing to the database?
+3. API Endpoints — Check All Five Exist
+GET /api/identity/lookup — does it search phone FIRST, then email if not found?
+POST /api/identity/create — does it normalise phone, check for duplicates, create app_link, and return the befiterId?
+PUT /api/identity/:befiterId — does it do partial updates, skip phone/email fields, and write to identity_updates for every changed field?
+POST /api/identity/:befiterId/link — does it create a row in app_links?
+GET /api/identity/:befiterId — does it return full profile including app_links?
+4. API Key Authentication — Check Middleware
+Does every API endpoint require x-api-key header?
+Is the key stored as a hash in the database, never plain text?
+Does a missing, wrong, or inactive key return 401?
+5. Rate Limiting — Check It Is Active
+Is rate limiting applied per API key?
+What is the limit set to?
+Does it return 429 when exceeded?
+6. Audit Log — Check identity_updates Is Being Written
+When a field is updated via PUT /api/identity/:befiterId, does a row get written to identity_updates for each changed field?
+Does it record: befiter_id, app_name, field_changed, old_value, new_value, changed_at?
+7. Admin Dashboard — Check All Four Pages Exist and Work
+Dashboard page — shows total BeFiter IDs, IDs this month, app links breakdown, and duplicate prevention count?
+Identity search page — can search by name, phone, or email and shows results?
+Identity profile page — shows all five sections (Core Identity, Address, Personal Details, Health Profile, App Links) plus an audit history tab?
+API Keys page — can generate a new key (shows raw key once only), deactivate/reactivate, never shows raw key again after creation?
+8. Admin Login — Check It Is Separate
+Does the admin dashboard have its own login page?
+Does it use session-based auth, separate from the API key system?
+Does it read credentials from environment variables (ADMIN_USERNAME, ADMIN_PASSWORD)?
+9. Environment Variables — Check All Are Used
+DATABASE_URL
+ADMIN_USERNAME
+ADMIN_PASSWORD
+SESSION_SECRET
+10. Business Rules — Check Each One
+Can phone or email be changed via the PUT update endpoint? They should NOT be allowed.
+If create is called with an email or phone that already exists, does it return 409?
+Is identity_tag always set to "member" by default with no way to change it via API?
+Is app_name stored as free text with no hardcoded validation or restriction?
+11. Code Structure — Check Files Exist
+Confirm these files exist:
+
+server/index.ts
+server/routes.ts
+server/storage.ts
+server/auth.ts
+server/phone-utils.ts (or equivalent phone normalisation file)
+shared/schema.ts
+client/src/App.tsx
+Admin pages for dashboard, identities, identity profile, api keys, admin login
+Your Report Format
+For each section above, respond like this:
+
+1. Database Tables
+   befiter_ids: Done — all columns present
+   app_links: ISSUE — column is named befiter_id_id instead of befiter_id
+   api_keys: Done
+   identity_updates: Not Done — table does not exist
+2. Phone Normalisation
+   normalisePhone function: Done
+   Handles all three formats: Done
+   Called on create: Done
+   Called on update: Not Done
+... and so on for all 11 sections
+Be thorough. Check the actual code and database, not just your memory of what you built. Report exactly what you find including any issues.
+

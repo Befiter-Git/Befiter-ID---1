@@ -1,0 +1,38 @@
+Before you start building, I need you to list everything you are going to build in full detail. Do not start coding yet. Just list and explain. Cover each section below completely:
+
+1. Database Tables — list every single column
+For each of the four tables (befiter_ids, app_links, api_keys, identity_updates), list every column name, its data type, whether it is required or optional, its default value if any, and any unique or foreign key constraints.
+
+2. Phone normalisation — explain the logic
+Show me the exact logic you will use to convert these three inputs to E.164 format:
+
+9876543210
+09876543210
++919876543210
+What is the expected output for each?
+3. API Endpoints — explain each one in full
+For each of the five endpoints, tell me: the method and path, what headers are required, what the request body looks like, what the exact logic is step by step, and what the response looks like for success and for each error case.
+
+4. API Key Authentication — explain the full flow
+How is the key generated? How is it stored? How is it validated on each request? What happens if the key is wrong, missing, or inactive? When is the raw key shown and when is it hidden?
+
+5. Rate limiting — explain exactly how it works
+Is the rate limit applied per API key or per IP address? What is the limit? What response is returned when the limit is exceeded?
+
+6. Audit logging — explain exactly what gets written
+When a PUT update is called and three fields are changed, how many rows are written to identity_updates? What exactly is stored in each row?
+
+7. Admin dashboard — list every page and every feature on each page
+List each page, what data it shows, what actions the user can take, and how the admin login works.
+
+8. Business rules — confirm each one
+
+Can phone or email be changed via the PUT endpoint?
+What happens if POST create is called with a phone number that already exists?
+What is the value of identity_tag and can it be changed?
+Is app_name validated against a fixed list or is it free text?
+When is a duplicate prevention count incremented?
+9. File structure — list every file you will create
+List the full file path for every file in the project.
+
+Reply with all of this before writing any code. I will review and confirm before you proceed.
