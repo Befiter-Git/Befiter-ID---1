@@ -52,7 +52,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/admin/identities", requireAdminSession, async (req: Request, res: Response) => {
+  app.get("/admin/identities", requireAdminSession, async (req: Request, res: Response, next) => {
+    if ((req.headers["accept"] || "").startsWith("text/html")) return next();
     try {
       const query = (req.query.q as string) || "";
       const page = parseInt((req.query.page as string) || "1", 10);
@@ -65,7 +66,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/admin/identity/:befiterId", requireAdminSession, async (req: Request, res: Response) => {
+  app.get("/admin/identity/:befiterId", requireAdminSession, async (req: Request, res: Response, next) => {
+    if ((req.headers["accept"] || "").startsWith("text/html")) return next();
     try {
       const identity = await storage.getIdentity(req.params.befiterId);
       if (!identity) return res.status(404).json({ error: "Identity not found" });
@@ -110,7 +112,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/admin/api-keys", requireAdminSession, async (_req: Request, res: Response) => {
+  app.get("/admin/api-keys", requireAdminSession, async (req: Request, res: Response, next) => {
+    if ((req.headers["accept"] || "").startsWith("text/html")) return next();
     try {
       const keys = await storage.getAllApiKeys();
       return res.json({ keys });
