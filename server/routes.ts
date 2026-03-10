@@ -2,12 +2,12 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
-import { storage } from "./storage";
+import { storage, EmailTakenError } from "./storage";
 import { apiKeyAuth } from "./auth";
 import { requireAdminSession, sessionMiddleware } from "./admin-auth";
 import { apiRateLimiter } from "./rate-limit";
 import { normalisePhone } from "./phone-utils";
-import { insertBefiterIdSchema, updateBefiterIdSchema } from "@shared/schema";
+import { insertBefiterIdSchema, updateBefiterIdSchema, patchBefiterIdSchema } from "@shared/schema";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   app.use(sessionMiddleware);
@@ -276,6 +276,27 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to update identity" });
+    }
+  });
+
+  app.patch("/api/identity/:id", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const parseResult = patchBefiterIdSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
+      }
+
+      const updated = await storage.patchIdentity(req.params.id, parseResult.data, req.appName!);
+      return res.json({ identity: updated });
+    } catch (err) {
+      if (err instanceof EmailTakenError) {
+        return res.status(409).json({ error: err.message });
+      }
+      if (err instanceof Error && err.message === "Identity not found") {
+        return res.status(404).json({ error: "Identity not found" });
+      }
+      console.error(err);
+      return res.status(500).json({ error: "Failed to patch identity" });
     }
   });
 

@@ -2,9 +2,14 @@ import { eq, ilike, or, and, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
   befiterIds, appLinks, apiKeys, identityUpdates, stats,
-  type BefiterId, type InsertBefiterId, type UpdateBefiterId,
+  type BefiterId, type InsertBefiterId, type UpdateBefiterId, type PatchBefiterId,
   type AppLink, type ApiKey, type IdentityUpdate, type BefiterIdWithLinks,
 } from "@shared/schema";
+
+export class EmailTakenError extends Error {
+  code = "EMAIL_TAKEN" as const;
+  constructor() { super("Email already belongs to another identity"); }
+}
 
 export interface DashboardStats {
   totalIds: number;
@@ -23,6 +28,7 @@ export interface IStorage {
   lookupByEmail(email: string): Promise<BefiterId | undefined>;
   createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<CreateOrUpdateResult>;
   updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<BefiterId>;
+  patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<BefiterId>;
   adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<BefiterId>;
   getIdentity(befiterId: string): Promise<BefiterIdWithLinks | undefined>;
   linkApp(befiterId: string, appName: string, appUserId: string): Promise<AppLink>;
@@ -141,6 +147,60 @@ export class DatabaseStorage implements IStorage {
 
     const [updated] = await db.update(befiterIds)
       .set({ ...data, updatedAt: new Date() })
+      .where(eq(befiterIds.id, befiterId))
+      .returning();
+
+    return updated;
+  }
+
+  async patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<BefiterId> {
+    const [existing] = await db.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
+    if (!existing) throw new Error("Identity not found");
+
+    if (data.email && data.email.toLowerCase() !== existing.email) {
+      const taken = await this.lookupByEmail(data.email);
+      if (taken && taken.id !== befiterId) throw new EmailTakenError();
+    }
+
+    const auditEntries: { befiterId: string; appName: string; fieldChanged: string; oldValue: string | null; newValue: string | null }[] = [];
+    const dbUpdate: Partial<BefiterId> & { previousPhones?: unknown } = {};
+
+    const { phone, email, ...rest } = data;
+
+    if (phone && phone !== existing.currentPhone) {
+      const oldPhone = existing.currentPhone;
+      dbUpdate.currentPhone = phone;
+      dbUpdate.previousPhones = sql`array_append(${befiterIds.previousPhones}, ${oldPhone}::text)` as unknown as string[];
+      auditEntries.push(
+        { befiterId, appName, fieldChanged: "currentPhone", oldValue: oldPhone, newValue: phone },
+        { befiterId, appName, fieldChanged: "previousPhones",
+          oldValue: JSON.stringify(existing.previousPhones ?? []),
+          newValue: JSON.stringify([...(existing.previousPhones ?? []), oldPhone]) },
+      );
+    }
+
+    if (email && email.toLowerCase() !== existing.email) {
+      const newEmail = email.toLowerCase();
+      dbUpdate.email = newEmail;
+      auditEntries.push({ befiterId, appName, fieldChanged: "email", oldValue: existing.email, newValue: newEmail });
+    }
+
+    for (const [field, newVal] of Object.entries(rest)) {
+      if (newVal === undefined) continue;
+      const oldVal = (existing as Record<string, unknown>)[field];
+      const oldStr = oldVal === null || oldVal === undefined ? null : String(oldVal);
+      const newStr = newVal === null ? null : String(newVal);
+      if (oldStr !== newStr) {
+        (dbUpdate as Record<string, unknown>)[field] = newVal;
+        auditEntries.push({ befiterId, appName, fieldChanged: field, oldValue: oldStr, newValue: newStr });
+      }
+    }
+
+    if (auditEntries.length > 0) await this.logAuditEntries(auditEntries);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [updated] = await db.update(befiterIds)
+      .set({ ...dbUpdate, updatedAt: new Date() } as any)
       .where(eq(befiterIds.id, befiterId))
       .returning();
 

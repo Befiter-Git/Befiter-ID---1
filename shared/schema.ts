@@ -87,6 +87,28 @@ export const updateBefiterIdSchema = createInsertSchema(befiterIds).omit({
   identityTag: true,
 }).partial();
 
+export const patchBefiterIdSchema = z.object({
+  fullName: z.string().min(1).optional(),
+  phone: z.string().min(1).optional(),
+  email: z.string().email().optional(),
+  dateOfBirth: z.string().optional(),
+  gender: z.string().optional(),
+  profilePhoto: z.string().optional(),
+  country: z.string().optional(),
+  state: z.string().optional(),
+  city: z.string().optional(),
+  pincode: z.string().optional(),
+  locality: z.string().optional(),
+  occupation: z.string().optional(),
+  maritalStatus: z.string().optional(),
+  emergencyContactName: z.string().optional(),
+  emergencyContactPhone: z.string().optional(),
+  height: z.string().optional(),
+  weight: z.string().optional(),
+  bloodGroup: z.string().optional(),
+  medicalHistory: z.string().optional(),
+});
+
 export const insertAppLinkSchema = createInsertSchema(appLinks).omit({
   id: true,
   linkedAt: true,
@@ -105,6 +127,7 @@ export const insertIdentityUpdateSchema = createInsertSchema(identityUpdates).om
 export type BefiterId = typeof befiterIds.$inferSelect;
 export type InsertBefiterId = z.infer<typeof insertBefiterIdSchema>;
 export type UpdateBefiterId = z.infer<typeof updateBefiterIdSchema>;
+export type PatchBefiterId = z.infer<typeof patchBefiterIdSchema>;
 export type AppLink = typeof appLinks.$inferSelect;
 export type InsertAppLink = z.infer<typeof insertAppLinkSchema>;
 export type ApiKey = typeof apiKeys.$inferSelect;
