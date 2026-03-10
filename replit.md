@@ -37,9 +37,9 @@ All require `x-api-key` header:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/identity/lookup` | Phone-priority lookup, increments dup-prevention counter |
-| POST | `/api/identity/create` | Create identity + app link (phone/email 409 on dupe) |
-| PUT | `/api/identity/:id` | Partial update (phone/email immutable) + audit log |
+| GET | `/api/identity/lookup` | Email-first lookup, returns `matched_by: "email"\|"phone"`, increments dup-prevention counter |
+| POST | `/api/identity/create` | Smart upsert by email: 201 if new, 200 if existing; updates phone if changed |
+| PUT | `/api/identity/:id` | Partial update (currentPhone/email immutable) + audit log |
 | POST | `/api/identity/:id/link` | Link another app to existing identity |
 | GET | `/api/identity/:id` | Fetch identity + all app links |
 
@@ -71,15 +71,27 @@ All phones stored in E.164 format using libphonenumber-js, default region India 
 - `09876543210` → `+919876543210`
 - `+919876543210` → `+919876543210`
 
+## Phone Handling
+
+- `current_phone` — the latest known phone number (unverified, can be recycled by operators)
+- `previous_phones` — array of all prior phone numbers for this identity (append-only, read-only)
+- Phone is NOT unique — two members can have the same phone (recycled SIM cards)
+- On create: if email already exists and phone changed, old phone is archived to `previous_phones`
+
 ## Key Business Rules
 
-1. **Lookup before create** — apps must call lookup first
-2. **Phone is primary** — lookup checks phone first, email second
-3. **Phone + email immutable** via API — admin can edit via dashboard
-4. **identityTag always "member"** — never changes
-5. **app_name is free text** — no hardcoded list, open for future products
-6. **Every field change logged** — one row per changed field in identity_updates
-7. **Duplicate prevention counter** — persisted in DB stats table
+1. **Email is the verified identifier** — email OTP is the login proof; always searched first in lookup
+2. **Phone is unverified** — only used for pre-fill, searched second in lookup
+3. **Lookup returns `matched_by`** — `"email"` or `"phone"` so caller knows confidence level
+4. **Create is a smart upsert by email**:
+   - Same email + same phone → 200, no changes
+   - Same email + different phone → 200, archives old phone to `previous_phones`
+   - Different email + any phone → 201, new identity (phone uniqueness not enforced)
+5. **currentPhone + email immutable** via API PUT — phone only changes via create/upsert flow
+6. **identityTag always "member"** — never changes
+7. **app_name is free text** — no hardcoded list, open for future products
+8. **Every field change logged** — one row per changed field in identity_updates
+9. **Duplicate prevention counter** — persisted in DB stats table
 
 ## File Structure
 

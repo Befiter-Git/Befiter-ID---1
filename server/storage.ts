@@ -13,10 +13,15 @@ export interface DashboardStats {
   duplicatePrevention: number;
 }
 
+export interface CreateOrUpdateResult {
+  identity: BefiterIdWithLinks;
+  created: boolean;
+}
+
 export interface IStorage {
-  lookupByPhone(phone: string): Promise<BefiterId | undefined>;
+  lookupByCurrentPhone(phone: string): Promise<BefiterId | undefined>;
   lookupByEmail(email: string): Promise<BefiterId | undefined>;
-  createIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<BefiterIdWithLinks>;
+  createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<CreateOrUpdateResult>;
   updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<BefiterId>;
   adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<BefiterId>;
   getIdentity(befiterId: string): Promise<BefiterIdWithLinks | undefined>;
@@ -33,30 +38,84 @@ export interface IStorage {
 }
 
 export class DatabaseStorage implements IStorage {
-  async lookupByPhone(phone: string): Promise<BefiterId | undefined> {
-    const [result] = await db.select().from(befiterIds).where(eq(befiterIds.phone, phone)).limit(1);
+  async lookupByCurrentPhone(phone: string): Promise<BefiterId | undefined> {
+    const [result] = await db.select().from(befiterIds)
+      .where(eq(befiterIds.currentPhone, phone))
+      .limit(1);
     return result;
   }
 
   async lookupByEmail(email: string): Promise<BefiterId | undefined> {
-    const [result] = await db.select().from(befiterIds).where(eq(befiterIds.email, email.toLowerCase())).limit(1);
+    const [result] = await db.select().from(befiterIds)
+      .where(eq(befiterIds.email, email.toLowerCase()))
+      .limit(1);
     return result;
   }
 
-  async createIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<BefiterIdWithLinks> {
+  private async getIdentityWithLinks(befiterId: string): Promise<BefiterIdWithLinks> {
+    const [identity] = await db.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
+    const links = await db.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
+    return { ...identity, appLinks: links };
+  }
+
+  private async ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void> {
+    const existing = await db.select().from(appLinks)
+      .where(and(eq(appLinks.befiterId, befiterId), eq(appLinks.appName, appName)))
+      .limit(1);
+    if (existing.length === 0) {
+      await db.insert(appLinks).values({ befiterId, appName, appUserId });
+    }
+  }
+
+  async createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<CreateOrUpdateResult> {
+    const existingByEmail = await this.lookupByEmail(data.email);
+
+    if (existingByEmail) {
+      const samePhone = existingByEmail.currentPhone === data.currentPhone;
+
+      if (!samePhone) {
+        const oldPhone = existingByEmail.currentPhone;
+        await db.update(befiterIds)
+          .set({
+            currentPhone: data.currentPhone,
+            previousPhones: sql`array_append(${befiterIds.previousPhones}, ${oldPhone}::text)`,
+            updatedAt: new Date(),
+          })
+          .where(eq(befiterIds.id, existingByEmail.id));
+
+        await this.logAuditEntries([
+          {
+            befiterId: existingByEmail.id,
+            appName,
+            fieldChanged: "currentPhone",
+            oldValue: oldPhone,
+            newValue: data.currentPhone,
+          },
+          {
+            befiterId: existingByEmail.id,
+            appName,
+            fieldChanged: "previousPhones",
+            oldValue: JSON.stringify(existingByEmail.previousPhones ?? []),
+            newValue: JSON.stringify([...(existingByEmail.previousPhones ?? []), oldPhone]),
+          },
+        ]);
+      }
+
+      await this.ensureAppLink(existingByEmail.id, appName, appUserId);
+      const identity = await this.getIdentityWithLinks(existingByEmail.id);
+      return { identity, created: false };
+    }
+
     const [identity] = await db.insert(befiterIds).values({
       ...data,
       email: data.email.toLowerCase(),
+      previousPhones: [],
       identityTag: "member",
     }).returning();
 
-    const [link] = await db.insert(appLinks).values({
-      befiterId: identity.id,
-      appName,
-      appUserId,
-    }).returning();
-
-    return { ...identity, appLinks: [link] };
+    await db.insert(appLinks).values({ befiterId: identity.id, appName, appUserId });
+    const identityWithLinks = await this.getIdentityWithLinks(identity.id);
+    return { identity: identityWithLinks, created: true };
   }
 
   async updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<BefiterId> {
@@ -70,13 +129,7 @@ export class DatabaseStorage implements IStorage {
       const oldStr = oldVal === null || oldVal === undefined ? null : String(oldVal);
       const newStr = newVal === null || newVal === undefined ? null : String(newVal);
       if (oldStr !== newStr) {
-        auditEntries.push({
-          befiterId,
-          appName,
-          fieldChanged: field,
-          oldValue: oldStr,
-          newValue: newStr,
-        });
+        auditEntries.push({ befiterId, appName, fieldChanged: field, oldValue: oldStr, newValue: newStr });
       }
     }
 
@@ -93,7 +146,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<BefiterId> {
-    const { id, createdAt, identityTag, ...updateData } = data as BefiterId;
+    const { id, createdAt, identityTag, previousPhones, ...updateData } = data as BefiterId;
     const [updated] = await db.update(befiterIds)
       .set({ ...updateData, updatedAt: new Date() })
       .where(eq(befiterIds.id, befiterId))
@@ -163,7 +216,7 @@ export class DatabaseStorage implements IStorage {
       ? or(
           ilike(befiterIds.fullName, `%${query}%`),
           ilike(befiterIds.email, `%${query}%`),
-          ilike(befiterIds.phone, `%${query}%`),
+          ilike(befiterIds.currentPhone, `%${query}%`),
         )
       : undefined;
 

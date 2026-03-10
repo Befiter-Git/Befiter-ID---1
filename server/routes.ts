@@ -8,7 +8,6 @@ import { requireAdminSession, sessionMiddleware } from "./admin-auth";
 import { apiRateLimiter } from "./rate-limit";
 import { normalisePhone } from "./phone-utils";
 import { insertBefiterIdSchema, updateBefiterIdSchema } from "@shared/schema";
-import { z } from "zod";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   app.use(sessionMiddleware);
@@ -150,6 +149,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ─── Public API Identity Routes ───────────────────────────────────────────
 
+  // Lookup: email first (verified via OTP), then phone (unverified — pre-fill only)
   app.get("/api/identity/lookup", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
     try {
       const { phone, email } = req.query as { phone?: string; email?: string };
@@ -159,19 +159,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       let identity = undefined;
+      let matchedBy: "email" | "phone" | undefined;
 
-      if (phone) {
-        const normalised = normalisePhone(phone);
-        identity = await storage.lookupByPhone(normalised);
+      // Email is searched FIRST — it is the verified login identifier (email OTP)
+      if (email) {
+        identity = await storage.lookupByEmail(email);
+        if (identity) matchedBy = "email";
       }
 
-      if (!identity && email) {
-        identity = await storage.lookupByEmail(email);
+      // Phone is searched SECOND only if email did not find anything
+      // Phone is unverified — result should be used for pre-fill only, not as confirmed identity
+      if (!identity && phone) {
+        const normalised = normalisePhone(phone);
+        identity = await storage.lookupByCurrentPhone(normalised);
+        if (identity) matchedBy = "phone";
       }
 
       if (identity) {
         await storage.incrementDuplicatePrevention();
-        return res.json({ found: true, identity });
+        return res.json({ found: true, matched_by: matchedBy, identity });
       }
 
       return res.json({ found: false });
@@ -181,33 +187,40 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // Create: smart upsert by email
+  // Email exists + same phone   → return existing, link app (200)
+  // Email exists + diff phone   → update current_phone, move old to previous_phones, link app (200)
+  // Email not found             → create new identity (201)
+  // Phone uniqueness is NOT enforced — phone numbers can be recycled by operators
   app.post("/api/identity/create", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
     try {
-      const parseResult = insertBefiterIdSchema.safeParse(req.body);
+      const body = { ...req.body };
+      // Accept both `phone` and `currentPhone` in request body for ease of integration
+      if (body.phone && !body.currentPhone) {
+        body.currentPhone = body.phone;
+      }
+      delete body.phone;
+
+      const parseResult = insertBefiterIdSchema.safeParse(body);
       if (!parseResult.success) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
 
       const data = parseResult.data;
-      data.phone = normalisePhone(data.phone);
-
-      const existingByPhone = await storage.lookupByPhone(data.phone);
-      if (existingByPhone) {
-        return res.status(409).json({ error: "Identity already exists with this phone number" });
-      }
-
-      const existingByEmail = await storage.lookupByEmail(data.email);
-      if (existingByEmail) {
-        return res.status(409).json({ error: "Identity already exists with this email address" });
-      }
+      data.currentPhone = normalisePhone(data.currentPhone);
 
       const { appUserId } = req.body;
       if (!appUserId) {
         return res.status(400).json({ error: "appUserId is required" });
       }
 
-      const identity = await storage.createIdentity(data, req.appName!, appUserId);
-      return res.status(201).json({ identity });
+      const result = await storage.createOrUpdateIdentity(data, req.appName!, appUserId);
+
+      if (result.created) {
+        return res.status(201).json({ identity: result.identity });
+      } else {
+        return res.status(200).json({ identity: result.identity });
+      }
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to create identity" });
@@ -220,6 +233,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!existing) return res.status(404).json({ error: "Identity not found" });
 
       const body = { ...req.body };
+      delete body.currentPhone;
+      delete body.previousPhones;
       delete body.phone;
       delete body.email;
       delete body.id;

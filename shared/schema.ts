@@ -6,7 +6,8 @@ import { z } from "zod";
 export const befiterIds = pgTable("befiter_ids", {
   id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
   fullName: text("full_name").notNull(),
-  phone: text("phone").notNull().unique(),
+  currentPhone: text("current_phone").notNull(),
+  previousPhones: text("previous_phones").array().default(sql`'{}'`),
   email: text("email").notNull().unique(),
   dateOfBirth: date("date_of_birth"),
   gender: text("gender"),
@@ -69,15 +70,17 @@ export const insertBefiterIdSchema = createInsertSchema(befiterIds).omit({
   createdAt: true,
   updatedAt: true,
   identityTag: true,
+  previousPhones: true,
 }).extend({
   fullName: z.string().min(1, "Full name is required"),
-  phone: z.string().min(1, "Phone is required"),
+  currentPhone: z.string().min(1, "Phone is required"),
   email: z.string().email("Valid email is required"),
 });
 
 export const updateBefiterIdSchema = createInsertSchema(befiterIds).omit({
   id: true,
-  phone: true,
+  currentPhone: true,
+  previousPhones: true,
   email: true,
   createdAt: true,
   updatedAt: true,

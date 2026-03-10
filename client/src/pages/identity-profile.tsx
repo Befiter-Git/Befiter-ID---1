@@ -33,6 +33,32 @@ function ReadOnlyField({ label, value, locked }: { label: string; value?: string
   );
 }
 
+function PreviousPhonesField({ phones }: { phones?: string[] | null }) {
+  return (
+    <div className="space-y-1 col-span-2">
+      <Label className="text-xs text-muted-foreground flex items-center gap-1">
+        Previous Phone Numbers
+        <Lock className="w-3 h-3" />
+      </Label>
+      {!phones || phones.length === 0 ? (
+        <p className="text-sm text-muted-foreground" data-testid="field-previous-phones-empty">—</p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5 mt-1" data-testid="field-previous-phones">
+          {phones.map((phone, i) => (
+            <span
+              key={i}
+              className="px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-xs font-mono"
+              data-testid={`prev-phone-${i}`}
+            >
+              {phone}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EditableField({ label, name, value, onChange, locked }: {
   label: string;
   name: string;
@@ -219,20 +245,22 @@ export default function IdentityProfile() {
               {editing === "core" ? (
                 <>
                   <EditableField label="Full Name" name="fullName" value={val("fullName")} onChange={handleChange} />
-                  <EditableField label="Phone" name="phone" value={val("phone")} onChange={handleChange} locked />
+                  <EditableField label="Current Phone" name="currentPhone" value={val("currentPhone")} onChange={handleChange} locked />
                   <EditableField label="Email" name="email" value={val("email")} onChange={handleChange} locked />
                   <EditableField label="Date of Birth" name="dateOfBirth" value={val("dateOfBirth")} onChange={handleChange} />
                   <EditableField label="Gender" name="gender" value={val("gender")} onChange={handleChange} />
                   <EditableField label="Profile Photo URL" name="profilePhoto" value={val("profilePhoto")} onChange={handleChange} />
+                  <PreviousPhonesField phones={identity.previousPhones} />
                 </>
               ) : (
                 <>
                   <ReadOnlyField label="Full Name" value={identity.fullName} />
-                  <ReadOnlyField label="Phone" value={identity.phone} locked />
+                  <ReadOnlyField label="Current Phone" value={identity.currentPhone} locked />
                   <ReadOnlyField label="Email" value={identity.email} locked />
                   <ReadOnlyField label="Date of Birth" value={identity.dateOfBirth ?? undefined} />
                   <ReadOnlyField label="Gender" value={identity.gender ?? undefined} />
                   <ReadOnlyField label="Profile Photo" value={identity.profilePhoto ?? undefined} />
+                  <PreviousPhonesField phones={identity.previousPhones} />
                 </>
               )}
             </SectionCard>
