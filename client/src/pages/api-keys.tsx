@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Copy, Check, AlertCircle } from "lucide-react";
+import { Plus, Copy, Check, AlertCircle, Trash2 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/admin-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +26,7 @@ export default function ApiKeys() {
   const [copied, setCopied] = useState(false);
 
   const [confirmToggle, setConfirmToggle] = useState<{ id: string; appName: string; currentState: boolean } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; appName: string } | null>(null);
 
   const { data, isLoading } = useQuery<{ keys: ApiKeyRecord[] }>({
     queryKey: ["/admin/api-keys"],
@@ -82,6 +83,24 @@ export default function ApiKeys() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(`/admin/api-keys/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to delete key");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/admin/api-keys"] });
+      toast({ title: "API key deleted" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const handleCopy = async () => {
     if (!generatedKey) return;
     await navigator.clipboard.writeText(generatedKey);
@@ -115,20 +134,21 @@ export default function ApiKeys() {
                 <TableHead>Status</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead>Active</TableHead>
+                <TableHead></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {isLoading ? (
                 [...Array(3)].map((_, i) => (
                   <TableRow key={i}>
-                    {[...Array(5)].map((_, j) => (
+                    {[...Array(6)].map((_, j) => (
                       <TableCell key={j}><Skeleton className="h-4 w-full" /></TableCell>
                     ))}
                   </TableRow>
                 ))
               ) : !data?.keys.length ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-center py-12 text-muted-foreground" data-testid="api-keys-empty">
+                  <TableCell colSpan={6} className="text-center py-12 text-muted-foreground" data-testid="api-keys-empty">
                     No API keys yet. Generate one to get started.
                   </TableCell>
                 </TableRow>
@@ -158,6 +178,18 @@ export default function ApiKeys() {
                         disabled={toggleMutation.isPending}
                         data-testid={`toggle-key-${key.id}`}
                       />
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                        onClick={() => setConfirmDelete({ id: key.id, appName: key.appName })}
+                        disabled={deleteMutation.isPending}
+                        data-testid={`button-delete-key-${key.id}`}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))
@@ -251,6 +283,32 @@ export default function ApiKeys() {
               data-testid="button-confirm-toggle"
             >
               Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!confirmDelete} onOpenChange={() => setConfirmDelete(null)}>
+        <AlertDialogContent data-testid="modal-confirm-delete">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete API Key?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete the API key for <strong>{confirmDelete?.appName}</strong>. Any app still using this key will immediately lose access and cannot be recovered.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-cancel-delete">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (confirmDelete) {
+                  deleteMutation.mutate(confirmDelete.id);
+                  setConfirmDelete(null);
+                }
+              }}
+              data-testid="button-confirm-delete"
+            >
+              Delete permanently
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

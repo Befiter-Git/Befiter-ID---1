@@ -147,6 +147,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.delete("/admin/api-keys/:id", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      await storage.deleteApiKey(req.params.id);
+      return res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to delete API key" });
+    }
+  });
+
   // ─── Public API Identity Routes ───────────────────────────────────────────
 
   // Lookup: email first (verified via OTP), then phone (unverified — pre-fill only)

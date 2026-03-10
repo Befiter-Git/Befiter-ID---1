@@ -35,6 +35,7 @@ export interface IStorage {
   getApiKeyByPrefix(prefix: string): Promise<ApiKey | undefined>;
   createApiKey(appName: string, keyHash: string, keyPrefix: string): Promise<ApiKey>;
   updateApiKeyStatus(id: string, isActive: boolean): Promise<ApiKey>;
+  deleteApiKey(id: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -258,6 +259,10 @@ export class DatabaseStorage implements IStorage {
   async updateApiKeyStatus(id: string, isActive: boolean): Promise<ApiKey> {
     const [updated] = await db.update(apiKeys).set({ isActive }).where(eq(apiKeys.id, id)).returning();
     return updated;
+  }
+
+  async deleteApiKey(id: string): Promise<void> {
+    await db.delete(apiKeys).where(eq(apiKeys.id, id));
   }
 }
 
