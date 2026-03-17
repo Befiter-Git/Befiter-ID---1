@@ -2,12 +2,12 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
-import { storage, EmailTakenError } from "./storage";
+import { storage, EmailTakenError, LeadNotFoundError } from "./storage";
 import { apiKeyAuth } from "./auth";
 import { requireAdminSession, sessionMiddleware } from "./admin-auth";
 import { apiRateLimiter } from "./rate-limit";
 import { normalisePhone } from "./phone-utils";
-import { insertBefiterIdSchema, updateBefiterIdSchema, patchBefiterIdSchema } from "@shared/schema";
+import { insertBefiterIdSchema, updateBefiterIdSchema, patchBefiterIdSchema, insertLeadSchema, patchLeadSchema } from "@shared/schema";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   app.use(sessionMiddleware);
@@ -331,6 +331,71 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to fetch identity" });
+    }
+  });
+
+  // ─── Leads API (public, api-key protected) ───────────────────────────────
+
+  app.post("/api/leads", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const parseResult = insertLeadSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
+      }
+      const lead = await storage.createLead(parseResult.data);
+      return res.status(201).json(lead);
+    } catch (err: any) {
+      if (err?.code === "23505") {
+        return res.status(409).json({ error: "A lead with this storeLeadId already exists" });
+      }
+      console.error(err);
+      return res.status(500).json({ error: "Failed to create lead" });
+    }
+  });
+
+  app.patch("/api/leads/:id", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const parseResult = patchLeadSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
+      }
+      const lead = await storage.patchLead(req.params.id, parseResult.data);
+      return res.json(lead);
+    } catch (err) {
+      if (err instanceof LeadNotFoundError) {
+        return res.status(404).json({ error: "Lead not found" });
+      }
+      console.error(err);
+      return res.status(500).json({ error: "Failed to update lead" });
+    }
+  });
+
+  app.get("/api/leads/lookup", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const storeLeadId = req.query.storeLeadId as string;
+      if (!storeLeadId) return res.status(400).json({ error: "storeLeadId query param is required" });
+      const lead = await storage.getLeadByStoreId(storeLeadId);
+      if (!lead) return res.json({ found: false });
+      return res.json({ found: true, lead });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to lookup lead" });
+    }
+  });
+
+  // ─── Leads Admin (dashboard) ──────────────────────────────────────────────
+
+  app.get("/admin/leads", requireAdminSession, async (req: Request, res: Response, next) => {
+    if ((req.headers["accept"] || "").startsWith("text/html")) return next();
+    try {
+      const query = (req.query.q as string) || "";
+      const page = parseInt((req.query.page as string) || "1", 10);
+      const limit = parseInt((req.query.limit as string) || "50", 10);
+      const result = await storage.searchLeads(query, page, limit);
+      return res.json(result);
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Failed to fetch leads" });
     }
   });
 

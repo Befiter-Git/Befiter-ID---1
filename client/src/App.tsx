@@ -7,6 +7,7 @@ import AdminLogin from "@/pages/admin-login";
 import Dashboard from "@/pages/dashboard";
 import Identities from "@/pages/identities";
 import IdentityProfile from "@/pages/identity-profile";
+import Leads from "@/pages/leads";
 import ApiKeys from "@/pages/api-keys";
 import NotFound from "@/pages/not-found";
 
@@ -18,6 +19,7 @@ function Router() {
       <Route path="/admin/dashboard" component={Dashboard} />
       <Route path="/admin/identities" component={Identities} />
       <Route path="/admin/identity/:befiterId" component={IdentityProfile} />
+      <Route path="/admin/leads" component={Leads} />
       <Route path="/admin/api-keys" component={ApiKeys} />
       <Route component={NotFound} />
     </Switch>

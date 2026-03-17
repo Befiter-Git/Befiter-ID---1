@@ -1,10 +1,15 @@
 import { eq, ilike, or, and, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
-  befiterIds, appLinks, apiKeys, identityUpdates, stats,
+  befiterIds, appLinks, apiKeys, identityUpdates, stats, leads,
   type BefiterId, type InsertBefiterId, type UpdateBefiterId, type PatchBefiterId,
   type AppLink, type ApiKey, type IdentityUpdate, type BefiterIdWithLinks,
+  type Lead, type InsertLead, type PatchLead,
 } from "@shared/schema";
+
+export class LeadNotFoundError extends Error {
+  constructor() { super("Lead not found"); }
+}
 
 export class EmailTakenError extends Error {
   code = "EMAIL_TAKEN" as const;
@@ -43,6 +48,10 @@ export interface IStorage {
   updateApiKeyStatus(id: string, isActive: boolean): Promise<ApiKey>;
   deleteApiKey(id: string): Promise<void>;
   deleteIdentity(befiterId: string): Promise<void>;
+  createLead(data: InsertLead): Promise<Lead>;
+  patchLead(id: string, data: PatchLead): Promise<Lead>;
+  getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined>;
+  searchLeads(query: string, page: number, limit: number): Promise<{ results: Lead[]; total: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -330,6 +339,49 @@ export class DatabaseStorage implements IStorage {
     await db.delete(identityUpdates).where(eq(identityUpdates.befiterId, befiterId));
     await db.delete(appLinks).where(eq(appLinks.befiterId, befiterId));
     await db.delete(befiterIds).where(eq(befiterIds.id, befiterId));
+  }
+
+  async createLead(data: InsertLead): Promise<Lead> {
+    const [lead] = await db.insert(leads).values(data).returning();
+    return lead;
+  }
+
+  async patchLead(id: string, data: PatchLead): Promise<Lead> {
+    const [existing] = await db.select().from(leads).where(eq(leads.id, id)).limit(1);
+    if (!existing) throw new LeadNotFoundError();
+    const [updated] = await db.update(leads)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(leads.id, id))
+      .returning();
+    return updated;
+  }
+
+  async getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined> {
+    const [result] = await db.select().from(leads)
+      .where(eq(leads.storeLeadId, storeLeadId))
+      .limit(1);
+    return result;
+  }
+
+  async searchLeads(query: string, page: number, limit: number): Promise<{ results: Lead[]; total: number }> {
+    const offset = (page - 1) * limit;
+    const whereClause = query
+      ? or(
+          ilike(leads.fullName, `%${query}%`),
+          ilike(leads.phone, `%${query}%`),
+          ilike(leads.email, `%${query}%`),
+        )
+      : undefined;
+
+    const [totalResult] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(leads)
+      .where(whereClause);
+
+    const results = whereClause
+      ? await db.select().from(leads).where(whereClause).limit(limit).offset(offset).orderBy(sql`${leads.createdAt} DESC`)
+      : await db.select().from(leads).limit(limit).offset(offset).orderBy(sql`${leads.createdAt} DESC`);
+
+    return { results, total: totalResult.count };
   }
 }
 

@@ -138,6 +138,57 @@ export type Stat = typeof stats.$inferSelect;
 
 export type BefiterIdWithLinks = BefiterId & { appLinks: AppLink[] };
 
+export const leads = pgTable("leads", {
+  id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
+  storeLeadId: text("store_lead_id").notNull().unique(),
+  fullName: text("full_name").notNull(),
+  phone: text("phone").notNull(),
+  email: text("email"),
+  brandName: text("brand_name").notNull(),
+  branchName: text("branch_name").notNull(),
+  leadSource: text("lead_source"),
+  leadStatus: text("lead_status").notNull(),
+  interestedService: text("interested_service"),
+  interestedPackage: text("interested_package"),
+  packagePrice: numeric("package_price"),
+  offeredPrice: numeric("offered_price"),
+  visitDate: text("visit_date"),
+  followUpDate: text("follow_up_date"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+const numericField = z.union([z.string(), z.number()]).transform(v => String(v)).optional();
+
+export const insertLeadSchema = createInsertSchema(leads).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  fullName: z.string().min(1, "Full name is required"),
+  phone: z.string().min(1, "Phone is required"),
+  brandName: z.string().min(1, "Brand name is required"),
+  branchName: z.string().min(1, "Branch name is required"),
+  leadStatus: z.string().min(1, "Lead status is required"),
+  storeLeadId: z.string().min(1, "Store lead ID is required"),
+  packagePrice: numericField,
+  offeredPrice: numericField,
+});
+
+export const patchLeadSchema = createInsertSchema(leads).omit({
+  id: true,
+  storeLeadId: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  packagePrice: numericField,
+  offeredPrice: numericField,
+}).partial();
+
+export type Lead = typeof leads.$inferSelect;
+export type InsertLead = z.infer<typeof insertLeadSchema>;
+export type PatchLead = z.infer<typeof patchLeadSchema>;
+
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),
