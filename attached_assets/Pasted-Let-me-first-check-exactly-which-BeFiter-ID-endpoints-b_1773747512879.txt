@@ -1,0 +1,94 @@
+Let me first check exactly which BeFiter ID endpoints befiter.store currently calls, so the instructions are precise:
+
+Now I have everything I need. Here are the complete, detailed instructions to give to whoever manages the BeFiter ID project:
+
+What to ADD to BeFiter ID (touch nothing existing)
+Existing endpoints — do NOT change any of these:
+GET /api/identity/lookup — keep exactly as is
+POST /api/identity/create — keep exactly as is
+POST /api/identity/:id/link — keep exactly as is
+PATCH /api/identity/:id — keep exactly as is
+Step 1 — Add a new leads table
+Create a new table called leads with these columns:
+
+Column	Type	Notes
+id	auto-generated UUID	BeFiter ID's own internal ID
+store_lead_id	text, unique	The lead ID from befiter.store — used to find this record later for updates
+full_name	text	
+phone	text	
+email	text, optional	
+brand_name	text	Name of the studio brand
+branch_name	text	Name of the branch
+lead_source	text, optional	walk_in / online / referral / social_media etc.
+lead_status	text	cold / warm / hot / converted / lost
+interested_service	text, optional	Name of service they were interested in
+interested_package	text, optional	Name of package they were interested in
+package_price	number, optional	Original price in rupees
+offered_price	number, optional	Negotiated price in rupees
+visit_date	text, optional	YYYY-MM-DD format
+follow_up_date	text, optional	YYYY-MM-DD format
+created_at	timestamp	auto
+updated_at	timestamp	auto
+Step 2 — Add exactly 3 new API endpoints
+Endpoint 1 — Create a lead
+
+POST /api/leads
+Header: x-api-key: <your api key>
+Body (JSON):
+{
+  "storeLeadId": "abc-123",
+  "fullName": "Nakshatra",
+  "phone": "9361616381",
+  "email": "naks@gmail.com",        // optional
+  "brandName": "BeFiter Fitness Hub",
+  "branchName": "Befiter Mathikere",
+  "leadSource": "walk_in",           // optional
+  "leadStatus": "cold",
+  "interestedService": "Gym",        // optional
+  "interestedPackage": "3 Month",    // optional
+  "packagePrice": 5000,              // optional
+  "offeredPrice": 4500,              // optional
+  "visitDate": "2026-03-17",         // optional
+  "followUpDate": "2026-03-20"       // optional
+}
+Response (201):
+{
+  "id": "<befiter-id-generated-uuid>",
+  "storeLeadId": "abc-123",
+  ...all the fields back
+}
+Endpoint 2 — Update a lead
+
+PATCH /api/leads/:id
+Header: x-api-key: <your api key>
+Body (JSON): any fields that changed — only send what changed, not all fields
+{
+  "leadStatus": "warm",
+  "followUpDate": "2026-03-25"
+}
+Response (200):
+{ updated lead record }
+Endpoint 3 — Look up a lead by befiter.store ID
+
+GET /api/leads/lookup?storeLeadId=abc-123
+Header: x-api-key: <your api key>
+Response if found (200):
+{
+  "found": true,
+  "lead": {
+    "id": "<befiter-id-generated-uuid>",
+    "storeLeadId": "abc-123",
+    ...all fields
+  }
+}
+Response if not found (200):
+{
+  "found": false
+}
+How authentication should work
+Use the same x-api-key header validation that already exists for the identity endpoints. No new authentication mechanism needed.
+
+That's it — nothing else changes
+The existing identity/member sync that befiter.store already does continues exactly as before. The new leads section is completely separate and doesn't interact with identities at all. Same person can appear in both — that's by design.
+
+Once those 3 endpoints are live in BeFiter ID, come back and I'll build the sync on the befiter.store side in one go.

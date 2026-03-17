@@ -1,0 +1,72 @@
+Here is the full explanation you can share with the BeFiter ID team:
+
+What is BeFiter ID and how it fits into the system
+BeFiter ID is a central identity and data service. Its job is to be the single source of truth for all people — members and leads — who interact with any fitness studio that uses the BeFiter platform.
+
+BeFiter Store (befiter.store) is the studio management software that studios use day-to-day. Studios use it to manage their members, collect payments, track leads, assign staff, and run their operations.
+
+These two systems are connected. When something important happens in befiter.store — like a new member joining or a lead being added — that data flows into BeFiter ID automatically in the background.
+
+What befiter.store sends to BeFiter ID today (already working)
+When a person becomes a member at any studio on the platform, befiter.store sends their data to BeFiter ID. This includes:
+
+Full name, phone number, email
+Date of birth, gender
+City, state, pincode, locality
+Occupation, marital status
+Height, weight, blood group
+Emergency contact details
+Medical history notes
+BeFiter ID creates an identity record for this person and sends back a unique BeFiter ID. That ID is stored in befiter.store and used for future updates. If the person already exists in BeFiter ID (matched by phone or email), they are linked rather than duplicated.
+
+After that, any time the studio updates the member's profile in befiter.store — change of phone, updated weight, new city — that change is pushed to BeFiter ID too, keeping the identity record current.
+
+What we want to add next — Lead sync
+Right now, leads (people who enquired at a studio but haven't joined yet) are only stored inside befiter.store. They never reach BeFiter ID.
+
+The problem with this: some leads will never become members. But their data is still real and valuable. They walked into a studio, shared their contact details, expressed interest in a service, discussed pricing. That data should live in BeFiter ID so it can be accessed and understood at a platform level — not just locked inside one studio's records.
+
+How leads work in befiter.store
+When someone enquires at a studio, a lead record is created. It captures:
+
+Who they are — name, phone, email (linked to their profile)
+Which studio and branch they visited
+What service or package they were interested in
+What price was offered
+Their current status — cold, warm, hot, converted, or lost
+Follow-up dates and notes
+Where they came from — walk-in, referral, social media, etc.
+If the lead eventually joins as a member, their status changes to converted and a separate member record is created. The lead record stays as it is — it does not get deleted or merged. So the same person can have both a lead record and a member record in befiter.store at the same time.
+
+What we want BeFiter ID to store — two separate sections
+We want BeFiter ID to have two completely independent sections:
+
+1. Members section — already exists (the current identity system). Stores personal and health profile data for people who are active members at any studio.
+
+2. Leads section — new. Stores enquiry data for people who visited a studio and showed interest but may or may not have joined. Completely separate from the members section. No merging, no linking between the two in BeFiter ID.
+
+The clean rule — no upgrades, no conversions in BeFiter ID
+When a lead in befiter.store converts to a member:
+
+BeFiter ID receives a lead record update — the status field changes to "converted"
+BeFiter ID also receives a new member record (the person's profile going into the members section)
+Both records exist independently in BeFiter ID. The lead record stays a lead record. The member record is a member record. No merging happens.
+This mirrors exactly how the CRM works in befiter.store itself — where there is an "Enquiries" tab and a "Members" tab, and a converted person appears in both.
+
+How befiter.store will communicate with BeFiter ID for leads
+Befiter.store will call BeFiter ID in three situations:
+
+New lead created → befiter.store calls BeFiter ID to create a lead record and stores the returned BeFiter ID lead ID for future use
+
+Lead updated (status change, follow-up date change, price change, notes, etc.) → befiter.store calls BeFiter ID to update that lead record using the stored BeFiter ID lead ID
+
+On startup → befiter.store scans for any existing leads that have not yet been synced to BeFiter ID and pushes them in a batch (same pattern that already exists for members)
+
+All calls use the existing x-api-key authentication header that is already in place for member sync.
+
+Summary of what BeFiter ID needs to add
+Just one new table and three new API endpoints. Nothing else changes. All existing member/identity endpoints remain exactly as they are.
+
+The new table stores lead data with a storeLeadId field so befiter.store can look up and update the correct record. The three endpoints are: create a lead, update a lead, and look up a lead by storeLeadId.
+
+That is the complete picture. Once those three endpoints are live, befiter.store will start syncing leads automatically and the data will flow cleanly into BeFiter ID's new leads section.
