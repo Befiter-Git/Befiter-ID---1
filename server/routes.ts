@@ -284,7 +284,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       if (profileData.phone) {
-        const byPhone = await storage.lookupByCurrentPhone(profileData.phone);
+        const normalisedPhone = normalisePhone(profileData.phone);
+        const byPhone = await storage.lookupByCurrentPhone(normalisedPhone);
         if (byPhone) {
           await storage.ensureAppLink(byPhone.id, appName, appUserId);
           if (Object.keys(profileData).length > 0) {
@@ -295,13 +296,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
       }
 
-      const { fullName, phone, email } = profileData;
-      if (!fullName || !phone || !email) {
+      const { fullName, phone: rawPhone, email, ...restProfile } = profileData;
+      if (!fullName || !rawPhone || !email) {
         return res.status(422).json({ error: "fullName, phone, and email are required to create a new identity" });
       }
 
       const result = await storage.createOrUpdateIdentity(
-        { fullName, phone: normalisePhone(phone), email, ...profileData } as Parameters<typeof storage.createOrUpdateIdentity>[0],
+        { ...restProfile, fullName, email, currentPhone: normalisePhone(rawPhone) } as Parameters<typeof storage.createOrUpdateIdentity>[0],
         appName,
         appUserId,
       );
