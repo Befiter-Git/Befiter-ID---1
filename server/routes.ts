@@ -261,42 +261,44 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       const { appUserId, ...profileData } = parseResult.data;
       const appName = req.appName!;
+      const normalisedProfileData = profileData.phone
+        ? { ...profileData, phone: normalisePhone(profileData.phone) }
+        : profileData;
 
       const byAppUserId = await storage.lookupByAppUserId(appName, appUserId);
       if (byAppUserId) {
-        if (Object.keys(profileData).length > 0) {
-          await storage.patchIdentity(byAppUserId.id, profileData, appName);
+        if (Object.keys(normalisedProfileData).length > 0) {
+          await storage.patchIdentity(byAppUserId.id, normalisedProfileData, appName);
         }
         const identity = await storage.getIdentity(byAppUserId.id);
         return res.json({ identity, matched_by: "appUserId" });
       }
 
-      if (profileData.email) {
-        const byEmail = await storage.lookupByEmail(profileData.email);
+      if (normalisedProfileData.email) {
+        const byEmail = await storage.lookupByEmail(normalisedProfileData.email);
         if (byEmail) {
           await storage.ensureAppLink(byEmail.id, appName, appUserId);
-          if (Object.keys(profileData).length > 0) {
-            await storage.patchIdentity(byEmail.id, profileData, appName);
+          if (Object.keys(normalisedProfileData).length > 0) {
+            await storage.patchIdentity(byEmail.id, normalisedProfileData, appName);
           }
           const identity = await storage.getIdentity(byEmail.id);
           return res.json({ identity, matched_by: "email" });
         }
       }
 
-      if (profileData.phone) {
-        const normalisedPhone = normalisePhone(profileData.phone);
-        const byPhone = await storage.lookupByCurrentPhone(normalisedPhone);
+      if (normalisedProfileData.phone) {
+        const byPhone = await storage.lookupByCurrentPhone(normalisedProfileData.phone);
         if (byPhone) {
           await storage.ensureAppLink(byPhone.id, appName, appUserId);
-          if (Object.keys(profileData).length > 0) {
-            await storage.patchIdentity(byPhone.id, profileData, appName);
+          if (Object.keys(normalisedProfileData).length > 0) {
+            await storage.patchIdentity(byPhone.id, normalisedProfileData, appName);
           }
           const identity = await storage.getIdentity(byPhone.id);
           return res.json({ identity, matched_by: "phone" });
         }
       }
 
-      const { fullName, phone: rawPhone, email, ...restProfile } = profileData;
+      const { fullName, phone: rawPhone, email, ...restProfile } = normalisedProfileData;
       if (!fullName || !rawPhone || !email) {
         return res.status(422).json({ error: "fullName, phone, and email are required to create a new identity" });
       }
@@ -306,7 +308,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         appName,
         appUserId,
       );
-      return res.status(201).json({ identity: result.identity, matched_by: "created" });
+      const statusCode = result.created ? 201 : 200;
+      const matchedBy = result.created ? "created" : "email";
+      return res.status(statusCode).json({ identity: result.identity, matched_by: matchedBy });
     } catch (err) {
       if (err instanceof EmailTakenError || (err as { code?: string })?.code === "EMAIL_TAKEN") {
         return res.status(409).json({ error: "Email already in use" });
