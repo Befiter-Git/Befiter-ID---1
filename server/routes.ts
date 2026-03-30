@@ -2,12 +2,12 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
-import { storage, EmailTakenError, LeadNotFoundError } from "./storage";
+import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError } from "./storage";
 import { apiKeyAuth } from "./auth";
 import { requireAdminSession, sessionMiddleware } from "./admin-auth";
 import { apiRateLimiter } from "./rate-limit";
 import { normalisePhone } from "./phone-utils";
-import { insertBefiterIdSchema, updateBefiterIdSchema, patchBefiterIdSchema, insertLeadSchema, patchLeadSchema } from "@shared/schema";
+import { insertBefiterIdSchema, updateBefiterIdSchema, patchBefiterIdSchema, upsertBefiterIdSchema, insertLeadSchema, patchLeadSchema } from "@shared/schema";
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   app.use(sessionMiddleware);
@@ -252,6 +252,69 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.put("/api/identity/upsert", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+    try {
+      const parseResult = upsertBefiterIdSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
+      }
+
+      const { appUserId, ...profileData } = parseResult.data;
+      const appName = req.appName!;
+
+      const byAppUserId = await storage.lookupByAppUserId(appName, appUserId);
+      if (byAppUserId) {
+        if (Object.keys(profileData).length > 0) {
+          await storage.patchIdentity(byAppUserId.id, profileData, appName);
+        }
+        const identity = await storage.getIdentity(byAppUserId.id);
+        return res.json({ identity, matched_by: "appUserId" });
+      }
+
+      if (profileData.email) {
+        const byEmail = await storage.lookupByEmail(profileData.email);
+        if (byEmail) {
+          await storage.ensureAppLink(byEmail.id, appName, appUserId);
+          if (Object.keys(profileData).length > 0) {
+            await storage.patchIdentity(byEmail.id, profileData, appName);
+          }
+          const identity = await storage.getIdentity(byEmail.id);
+          return res.json({ identity, matched_by: "email" });
+        }
+      }
+
+      if (profileData.phone) {
+        const byPhone = await storage.lookupByCurrentPhone(profileData.phone);
+        if (byPhone) {
+          await storage.ensureAppLink(byPhone.id, appName, appUserId);
+          if (Object.keys(profileData).length > 0) {
+            await storage.patchIdentity(byPhone.id, profileData, appName);
+          }
+          const identity = await storage.getIdentity(byPhone.id);
+          return res.json({ identity, matched_by: "phone" });
+        }
+      }
+
+      const { fullName, phone, email } = profileData;
+      if (!fullName || !phone || !email) {
+        return res.status(422).json({ error: "fullName, phone, and email are required to create a new identity" });
+      }
+
+      const result = await storage.createOrUpdateIdentity(
+        { fullName, phone: normalisePhone(phone), email, ...profileData } as Parameters<typeof storage.createOrUpdateIdentity>[0],
+        appName,
+        appUserId,
+      );
+      return res.status(201).json({ identity: result.identity, matched_by: "created" });
+    } catch (err) {
+      if (err instanceof EmailTakenError || (err as { code?: string })?.code === "EMAIL_TAKEN") {
+        return res.status(409).json({ error: "Email already in use" });
+      }
+      console.error(err);
+      return res.status(500).json({ error: "Failed to upsert identity" });
+    }
+  });
+
   app.put("/api/identity/:befiterId", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
     try {
       const existing = await storage.getIdentity(req.params.befiterId);
@@ -289,11 +352,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const updated = await storage.patchIdentity(req.params.id, parseResult.data, req.appName!);
       return res.json({ identity: updated });
     } catch (err) {
-      if (err instanceof EmailTakenError) {
-        return res.status(409).json({ error: err.message });
-      }
-      if (err instanceof Error && err.message === "Identity not found") {
+      if (err instanceof IdentityNotFoundError || (err as { code?: string })?.code === "IDENTITY_NOT_FOUND") {
         return res.status(404).json({ error: "Identity not found" });
+      }
+      if (err instanceof EmailTakenError || (err as { code?: string })?.code === "EMAIL_TAKEN") {
+        return res.status(409).json({ error: "Email already in use" });
       }
       console.error(err);
       return res.status(500).json({ error: "Failed to patch identity" });

@@ -16,6 +16,11 @@ export class EmailTakenError extends Error {
   constructor() { super("Email already belongs to another identity"); }
 }
 
+export class IdentityNotFoundError extends Error {
+  code = "IDENTITY_NOT_FOUND" as const;
+  constructor() { super("Identity not found"); }
+}
+
 export interface DashboardStats {
   totalIds: number;
   thisMonth: number;
@@ -52,6 +57,8 @@ export interface IStorage {
   patchLead(id: string, data: PatchLead): Promise<Lead>;
   getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined>;
   searchLeads(query: string, page: number, limit: number): Promise<{ results: Lead[]; total: number }>;
+  lookupByAppUserId(appName: string, appUserId: string): Promise<BefiterIdWithLinks | undefined>;
+  ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -75,7 +82,7 @@ export class DatabaseStorage implements IStorage {
     return { ...identity, appLinks: links };
   }
 
-  private async ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void> {
+  async ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void> {
     const existing = await db.select().from(appLinks)
       .where(and(eq(appLinks.befiterId, befiterId), eq(appLinks.appName, appName)))
       .limit(1);
@@ -164,7 +171,7 @@ export class DatabaseStorage implements IStorage {
 
   async patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<BefiterId> {
     const [existing] = await db.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
-    if (!existing) throw new Error("Identity not found");
+    if (!existing) throw new IdentityNotFoundError();
 
     if (data.email && data.email.toLowerCase() !== existing.email) {
       const taken = await this.lookupByEmail(data.email);
@@ -361,6 +368,14 @@ export class DatabaseStorage implements IStorage {
       .where(eq(leads.storeLeadId, storeLeadId))
       .limit(1);
     return result;
+  }
+
+  async lookupByAppUserId(appName: string, appUserId: string): Promise<BefiterIdWithLinks | undefined> {
+    const [link] = await db.select().from(appLinks)
+      .where(and(eq(appLinks.appName, appName), eq(appLinks.appUserId, appUserId)))
+      .limit(1);
+    if (!link) return undefined;
+    return this.getIdentity(link.befiterId);
   }
 
   async searchLeads(query: string, page: number, limit: number): Promise<{ results: Lead[]; total: number }> {

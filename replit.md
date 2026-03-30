@@ -39,7 +39,9 @@ All require `x-api-key` header:
 |--------|------|---------|
 | GET | `/api/identity/lookup` | Email-first lookup, returns `matched_by: "email"\|"phone"`, increments dup-prevention counter |
 | POST | `/api/identity/create` | Smart upsert by email: 201 if new, 200 if existing; updates phone if changed |
+| PUT | `/api/identity/upsert` | Idempotent upsert: looks up by appUserId→email→phone→create; returns `matched_by` + identity; 201 on create, 200 on match |
 | PUT | `/api/identity/:id` | Partial update (currentPhone/email immutable) + audit log |
+| PATCH | `/api/identity/:id` | Partial patch with phone archiving + email uniqueness; 404 if not found, 409 if email taken |
 | POST | `/api/identity/:id/link` | Link another app to existing identity |
 | GET | `/api/identity/:id` | Fetch identity + all app links |
 

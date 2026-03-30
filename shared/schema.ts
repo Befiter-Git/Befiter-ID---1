@@ -109,6 +109,11 @@ export const patchBefiterIdSchema = z.object({
   medicalHistory: z.string().optional(),
 });
 
+export const upsertBefiterIdSchema = patchBefiterIdSchema.extend({
+  appUserId: z.string().min(1),
+});
+export type UpsertBefiterId = z.infer<typeof upsertBefiterIdSchema>;
+
 export const insertAppLinkSchema = createInsertSchema(appLinks).omit({
   id: true,
   linkedAt: true,
