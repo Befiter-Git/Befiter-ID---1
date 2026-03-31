@@ -117,7 +117,7 @@ export const patchBefiterIdSchema = z.object({
   medicalHistory: z.string().optional(),
   injuries: z.string().optional(),
   healthConditions: z.string().optional(),
-  anniversary: z.string().optional(),
+  anniversary: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
 });
 
 export const upsertBefiterIdSchema = patchBefiterIdSchema.extend({
