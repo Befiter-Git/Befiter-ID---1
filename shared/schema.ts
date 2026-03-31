@@ -27,6 +27,11 @@ export const befiterIds = pgTable("befiter_ids", {
   bloodGroup: text("blood_group"),
   fitnessGoals: text("fitness_goals").array(),
   medicalHistory: text("medical_history"),
+  injuries: text("injuries"),
+  healthConditions: text("health_conditions"),
+  anniversary: date("anniversary"),
+  emergencyContactRelationship: text("emergency_contact_relationship"),
+  landmark: text("landmark"),
   identityTag: text("identity_tag").default("member"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -103,10 +108,16 @@ export const patchBefiterIdSchema = z.object({
   maritalStatus: z.string().optional(),
   emergencyContactName: z.string().optional(),
   emergencyContactPhone: z.string().optional(),
+  emergencyContactRelationship: z.string().optional(),
+  landmark: z.string().optional(),
   height: z.string().optional(),
   weight: z.string().optional(),
   bloodGroup: z.string().optional(),
+  fitnessGoals: z.array(z.string()).optional(),
   medicalHistory: z.string().optional(),
+  injuries: z.string().optional(),
+  healthConditions: z.string().optional(),
+  anniversary: z.string().optional(),
 });
 
 export const upsertBefiterIdSchema = patchBefiterIdSchema.extend({

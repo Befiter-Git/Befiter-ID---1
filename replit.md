@@ -19,7 +19,7 @@ Centralised identity platform for the BeFiter ecosystem. Single source of truth 
 
 | Table | Purpose |
 |-------|---------|
-| `befiter_ids` | Core identity records (24 columns) |
+| `befiter_ids` | Core identity records (29 columns) |
 | `app_links` | Which apps are linked to each identity |
 | `api_keys` | Auth keys for connected apps (with keyPrefix for fast lookup) |
 | `identity_updates` | Audit log — one row per changed field |

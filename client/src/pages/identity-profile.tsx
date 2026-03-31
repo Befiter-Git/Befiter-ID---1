@@ -308,13 +308,25 @@ export default function IdentityProfile() {
               onCancel={handleCancel}
               isSaving={updateMutation.isPending}
             >
-              {(["country", "state", "city", "pincode", "locality"] as const).map((field) => (
-                editing === "address" ? (
-                  <EditableField key={field} label={field.charAt(0).toUpperCase() + field.slice(1)} name={field} value={val(field)} onChange={handleChange} />
-                ) : (
-                  <ReadOnlyField key={field} label={field.charAt(0).toUpperCase() + field.slice(1)} value={(identity as Record<string, unknown>)[field] as string | null} />
-                )
-              ))}
+              {editing === "address" ? (
+                <>
+                  <EditableField label="Country" name="country" value={val("country")} onChange={handleChange} />
+                  <EditableField label="State" name="state" value={val("state")} onChange={handleChange} />
+                  <EditableField label="City" name="city" value={val("city")} onChange={handleChange} />
+                  <EditableField label="Pincode" name="pincode" value={val("pincode")} onChange={handleChange} />
+                  <EditableField label="Locality" name="locality" value={val("locality")} onChange={handleChange} />
+                  <EditableField label="Landmark" name="landmark" value={val("landmark")} onChange={handleChange} />
+                </>
+              ) : (
+                <>
+                  <ReadOnlyField label="Country" value={identity.country ?? undefined} />
+                  <ReadOnlyField label="State" value={identity.state ?? undefined} />
+                  <ReadOnlyField label="City" value={identity.city ?? undefined} />
+                  <ReadOnlyField label="Pincode" value={identity.pincode ?? undefined} />
+                  <ReadOnlyField label="Locality" value={identity.locality ?? undefined} />
+                  <ReadOnlyField label="Landmark" value={identity.landmark ?? undefined} />
+                </>
+              )}
             </SectionCard>
 
             <SectionCard
@@ -330,16 +342,20 @@ export default function IdentityProfile() {
                 <>
                   <EditableField label="Occupation" name="occupation" value={val("occupation")} onChange={handleChange} />
                   <EditableField label="Marital Status" name="maritalStatus" value={val("maritalStatus")} onChange={handleChange} />
+                  <EditableField label="Anniversary" name="anniversary" value={val("anniversary")} onChange={handleChange} />
                   <EditableField label="Emergency Contact Name" name="emergencyContactName" value={val("emergencyContactName")} onChange={handleChange} />
                   <EditableField label="Emergency Contact Phone" name="emergencyContactPhone" value={val("emergencyContactPhone")} onChange={handleChange} />
+                  <EditableField label="Emergency Contact Relationship" name="emergencyContactRelationship" value={val("emergencyContactRelationship")} onChange={handleChange} />
                   <EditableField label="Language Preference" name="languagePreference" value={val("languagePreference")} onChange={handleChange} />
                 </>
               ) : (
                 <>
                   <ReadOnlyField label="Occupation" value={identity.occupation ?? undefined} />
                   <ReadOnlyField label="Marital Status" value={identity.maritalStatus ?? undefined} />
+                  <ReadOnlyField label="Anniversary" value={identity.anniversary ?? undefined} />
                   <ReadOnlyField label="Emergency Contact Name" value={identity.emergencyContactName ?? undefined} />
                   <ReadOnlyField label="Emergency Contact Phone" value={identity.emergencyContactPhone ?? undefined} />
+                  <ReadOnlyField label="Emergency Contact Relationship" value={identity.emergencyContactRelationship ?? undefined} />
                   <ReadOnlyField label="Language Preference" value={identity.languagePreference ?? undefined} />
                 </>
               )}
@@ -360,6 +376,8 @@ export default function IdentityProfile() {
                   <EditableField label="Weight (kg)" name="weight" value={val("weight")} onChange={handleChange} />
                   <EditableField label="Blood Group" name="bloodGroup" value={val("bloodGroup")} onChange={handleChange} />
                   <EditableField label="Medical History" name="medicalHistory" value={val("medicalHistory")} onChange={handleChange} />
+                  <EditableField label="Injuries" name="injuries" value={val("injuries")} onChange={handleChange} />
+                  <EditableField label="Health Conditions" name="healthConditions" value={val("healthConditions")} onChange={handleChange} />
                 </>
               ) : (
                 <>
@@ -367,6 +385,20 @@ export default function IdentityProfile() {
                   <ReadOnlyField label="Weight (kg)" value={identity.weight ? String(identity.weight) : undefined} />
                   <ReadOnlyField label="Blood Group" value={identity.bloodGroup ?? undefined} />
                   <ReadOnlyField label="Medical History" value={identity.medicalHistory ?? undefined} />
+                  <ReadOnlyField label="Injuries" value={identity.injuries ?? undefined} />
+                  <ReadOnlyField label="Health Conditions" value={identity.healthConditions ?? undefined} />
+                  {identity.fitnessGoals && identity.fitnessGoals.length > 0 && (
+                    <div className="space-y-1 col-span-2">
+                      <Label className="text-xs text-muted-foreground">Fitness Goals</Label>
+                      <div className="flex flex-wrap gap-1.5 mt-1" data-testid="field-fitness-goals">
+                        {identity.fitnessGoals.map((goal, i) => (
+                          <span key={i} className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-medium" data-testid={`fitness-goal-${i}`}>
+                            {goal}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </SectionCard>
