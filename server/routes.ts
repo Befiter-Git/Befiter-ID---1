@@ -5,7 +5,7 @@ import { randomBytes } from "crypto";
 import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError } from "./storage";
 import { apiKeyAuth } from "./auth";
 import { requireAdminSession, sessionMiddleware } from "./admin-auth";
-import { apiRateLimiter } from "./rate-limit";
+import { readRateLimiter, writeRateLimiter, adminLoginLimiter, apiError } from "./security";
 import { normalisePhone } from "./phone-utils";
 import { insertBefiterIdSchema, updateBefiterIdSchema, patchBefiterIdSchema, upsertBefiterIdSchema, insertLeadSchema, patchLeadSchema } from "@shared/schema";
 
@@ -14,8 +14,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ─── Admin Auth Routes ────────────────────────────────────────────────────
 
-  app.post("/admin/login", async (req: Request, res: Response) => {
-    const { username, password } = req.body;
+  app.post("/admin/login", adminLoginLimiter, async (req: Request, res: Response) => {
+    const { username, password } = req.body ?? {};
     const adminUsername = process.env.ADMIN_USERNAME || "admin";
     const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
 
@@ -24,7 +24,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       req.session.adminUsername = username;
       return res.json({ success: true });
     }
-    return res.status(401).json({ error: "Invalid username or password" });
+    return apiError(res, 401, "UNAUTHORIZED", "Invalid username or password");
   });
 
   app.post("/admin/logout", (req: Request, res: Response) => {
@@ -175,7 +175,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ─── Public API Identity Routes ───────────────────────────────────────────
 
   // Lookup: email first (verified via OTP), then phone (unverified — pre-fill only)
-  app.get("/api/identity/lookup", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.get("/api/identity/lookup", apiKeyAuth, readRateLimiter, async (req: Request, res: Response) => {
     try {
       const { phone, email } = req.query as { phone?: string; email?: string };
 
@@ -218,7 +218,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Email exists + diff phone   → update current_phone, move old to previous_phones, link app (200)
   // Email not found             → create new identity (201)
   // Phone uniqueness is NOT enforced — phone numbers can be recycled by operators
-  app.post("/api/identity/create", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.post("/api/identity/create", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
       const body = { ...req.body };
       // Accept both `phone` and `currentPhone` in request body for ease of integration
@@ -253,7 +253,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.put("/api/identity/upsert", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.put("/api/identity/upsert", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
       const parseResult = upsertBefiterIdSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -321,7 +321,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.put("/api/identity/:befiterId", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.put("/api/identity/:befiterId", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
       const existing = await storage.getIdentity(req.params.befiterId);
       if (!existing) return res.status(404).json({ error: "Identity not found" });
@@ -348,7 +348,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.patch("/api/identity/:id", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.patch("/api/identity/:id", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
       const parseResult = patchBefiterIdSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -374,7 +374,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.post("/api/identity/:befiterId/link", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.post("/api/identity/:befiterId/link", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
       const existing = await storage.getIdentity(req.params.befiterId);
       if (!existing) return res.status(404).json({ error: "Identity not found" });
@@ -398,7 +398,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/identity/:befiterId", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.get("/api/identity/:befiterId", apiKeyAuth, readRateLimiter, async (req: Request, res: Response) => {
     try {
       const identity = await storage.getIdentity(req.params.befiterId);
       if (!identity) return res.status(404).json({ error: "Identity not found" });
@@ -411,7 +411,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ─── Leads API (public, api-key protected) ───────────────────────────────
 
-  app.post("/api/leads", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.post("/api/leads", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
       const parseResult = insertLeadSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -429,7 +429,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.patch("/api/leads/:id", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.patch("/api/leads/:id", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
       const parseResult = patchLeadSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -450,7 +450,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/leads/lookup", apiKeyAuth, apiRateLimiter, async (req: Request, res: Response) => {
+  app.get("/api/leads/lookup", apiKeyAuth, readRateLimiter, async (req: Request, res: Response) => {
     try {
       const storeLeadId = req.query.storeLeadId as string;
       if (!storeLeadId) return res.status(400).json({ error: "storeLeadId query param is required" });

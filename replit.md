@@ -81,6 +81,24 @@ All phones stored in E.164 format using libphonenumber-js, default region India 
 - On create: if email already exists and phone changed, old phone is archived to `previous_phones`
 - All phone inputs (identity create/upsert/patch + lead create/patch) are normalised via `normalisePhone()` before persistence
 
+## Backend Hardening v1.0 (Step 2)
+
+- Helmet sets standard HTTP security headers on all responses.
+- CORS is restricted via `ALLOWED_ORIGINS` env (comma-separated list); empty = allow all (dev).
+- JSON body limit reduced from 10mb → 1mb (no embedded base64; only URLs).
+- `/healthz` returns `{status:"ok",uptime}` for liveness checks.
+- Rate limits split per route class (per minute, per API key, falls back to IP):
+  - read endpoints (GET): 200/min — `readRateLimiter`
+  - write endpoints (POST/PUT/PATCH): 60/min — `writeRateLimiter`
+  - `/admin/login`: 10 per 15 min per IP — `adminLoginLimiter`
+- Standardized error envelope: `{ error, code, details? }` via `apiError()` with stable `code`s
+  (`VALIDATION_FAILED`, `UNAUTHORIZED`, `EMAIL_TAKEN`, `IDENTITY_NOT_FOUND`, `RATE_LIMIT_EXCEEDED`, ...).
+- Request logger now redacts PII (`email`, `phone`, `fullName`, `dateOfBirth`, photos, medical fields,
+  passwords, raw API keys) and only logs response bodies on errors (status >= 400). Lines truncated at 400 chars.
+- Production config gate (`assertProductionConfig`): server refuses to start in `NODE_ENV=production`
+  if `SESSION_SECRET` or `ADMIN_PASSWORD` are still defaults.
+- Admin session cookie now sets `sameSite: lax` (CSRF defence).
+
 ## Data Contract Guarantees (v1.0)
 
 - All identity-returning endpoints respond with the full `BefiterIdWithLinks` shape (identity fields + `appLinks` array)

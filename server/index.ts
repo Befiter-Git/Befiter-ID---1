@@ -2,6 +2,9 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { helmetMiddleware, corsMiddleware, redactPII, assertProductionConfig } from "./security";
+
+assertProductionConfig();
 
 const app = express();
 app.set('trust proxy', 1);
@@ -13,16 +16,23 @@ declare module "http" {
   }
 }
 
+app.use(helmetMiddleware);
+app.use(corsMiddleware);
+
 app.use(
   express.json({
-    limit: '10mb',
+    limit: '1mb',
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
 
-app.use(express.urlencoded({ limit: '10mb', extended: false }));
+app.use(express.urlencoded({ limit: '1mb', extended: false }));
+
+app.get("/healthz", (_req: Request, res: Response) => {
+  res.json({ status: "ok", uptime: process.uptime() });
+});
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -48,12 +58,13 @@ app.use((req, res, next) => {
 
   res.on("finish", () => {
     const duration = Date.now() - start;
-    if (path.startsWith("/api")) {
+    if (path.startsWith("/api") || path.startsWith("/admin")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+      if (capturedJsonResponse && res.statusCode >= 400) {
+        const safe = redactPII(capturedJsonResponse);
+        logLine += ` :: ${JSON.stringify(safe)}`;
       }
-
+      if (logLine.length > 400) logLine = logLine.slice(0, 397) + "...";
       log(logLine);
     }
   });
