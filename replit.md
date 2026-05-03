@@ -79,6 +79,16 @@ All phones stored in E.164 format using libphonenumber-js, default region India 
 - `previous_phones` — array of all prior phone numbers for this identity (append-only, read-only)
 - Phone is NOT unique — two members can have the same phone (recycled SIM cards)
 - On create: if email already exists and phone changed, old phone is archived to `previous_phones`
+- All phone inputs (identity create/upsert/patch + lead create/patch) are normalised via `normalisePhone()` before persistence
+
+## Data Contract Guarantees (v1.0)
+
+- All identity-returning endpoints respond with the full `BefiterIdWithLinks` shape (identity fields + `appLinks` array)
+- `height` and `weight` are serialized as JSON numbers (not strings) via `serializeIdentity()` helper in `storage.ts`
+- `dateOfBirth` and `anniversary` validated as `YYYY-MM-DD` on patch
+- `languagePreference` accepted on patch/upsert (BCP 47 code, defaults to `"en"`)
+- `fitnessGoals` validated against `VALID_FITNESS_GOALS` enum: Weight Loss, Muscle Gain, Flexibility, Endurance, General Fitness, Rehabilitation, Sports Performance, Stress Relief
+- `updatedAt` refreshed on every successful patch/update via storage layer
 
 ## Key Business Rules
 

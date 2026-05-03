@@ -82,6 +82,17 @@ export const insertBefiterIdSchema = createInsertSchema(befiterIds).omit({
   email: z.string().email("Valid email is required"),
 });
 
+export const VALID_FITNESS_GOALS = [
+  "Weight Loss",
+  "Muscle Gain",
+  "Flexibility",
+  "Endurance",
+  "General Fitness",
+  "Rehabilitation",
+  "Sports Performance",
+  "Stress Relief",
+] as const;
+
 export const updateBefiterIdSchema = createInsertSchema(befiterIds).omit({
   id: true,
   currentPhone: true,
@@ -90,13 +101,17 @@ export const updateBefiterIdSchema = createInsertSchema(befiterIds).omit({
   createdAt: true,
   updatedAt: true,
   identityTag: true,
-}).partial();
+}).partial().extend({
+  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
+  anniversary: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
+  fitnessGoals: z.array(z.enum(VALID_FITNESS_GOALS)).optional(),
+});
 
 export const patchBefiterIdSchema = z.object({
   fullName: z.string().min(1).optional(),
   phone: z.string().min(1).optional(),
   email: z.string().email().optional(),
-  dateOfBirth: z.string().optional(),
+  dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
   gender: z.string().optional(),
   profilePhoto: z.string().optional(),
   country: z.string().optional(),
@@ -110,10 +125,11 @@ export const patchBefiterIdSchema = z.object({
   emergencyContactPhone: z.string().optional(),
   emergencyContactRelationship: z.string().optional(),
   landmark: z.string().optional(),
+  languagePreference: z.string().min(2).max(10).optional(),
   height: z.union([z.string(), z.number()]).transform(v => String(v)).optional(),
   weight: z.union([z.string(), z.number()]).transform(v => String(v)).optional(),
   bloodGroup: z.string().optional(),
-  fitnessGoals: z.array(z.string()).optional(),
+  fitnessGoals: z.array(z.enum(VALID_FITNESS_GOALS)).optional(),
   medicalHistory: z.string().optional(),
   injuries: z.string().optional(),
   healthConditions: z.string().optional(),

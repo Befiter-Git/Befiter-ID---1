@@ -29,24 +29,40 @@ export interface DashboardStats {
 }
 
 export interface CreateOrUpdateResult {
-  identity: BefiterIdWithLinks;
+  identity: SerializedBefiterIdWithLinks;
   created: boolean;
+}
+
+export type SerializedBefiterId = Omit<BefiterId, "height" | "weight"> & {
+  height: number | null;
+  weight: number | null;
+};
+export type SerializedBefiterIdWithLinks = SerializedBefiterId & { appLinks: AppLink[] };
+
+export function serializeIdentity(identity: BefiterId): SerializedBefiterId;
+export function serializeIdentity(identity: BefiterIdWithLinks): SerializedBefiterIdWithLinks;
+export function serializeIdentity(identity: BefiterId | BefiterIdWithLinks): SerializedBefiterId | SerializedBefiterIdWithLinks {
+  return {
+    ...identity,
+    height: identity.height != null ? Number(identity.height) : null,
+    weight: identity.weight != null ? Number(identity.weight) : null,
+  };
 }
 
 export interface IStorage {
   lookupByCurrentPhone(phone: string): Promise<BefiterId | undefined>;
   lookupByEmail(email: string): Promise<BefiterId | undefined>;
   createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<CreateOrUpdateResult>;
-  updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<BefiterId>;
-  patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<BefiterId>;
-  adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<BefiterId>;
-  getIdentity(befiterId: string): Promise<BefiterIdWithLinks | undefined>;
+  updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks>;
+  patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks>;
+  adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<SerializedBefiterIdWithLinks>;
+  getIdentity(befiterId: string): Promise<SerializedBefiterIdWithLinks | undefined>;
   linkApp(befiterId: string, appName: string, appUserId: string): Promise<AppLink>;
   logAuditEntries(entries: { befiterId: string; appName: string; fieldChanged: string; oldValue: string | null; newValue: string | null }[]): Promise<void>;
   getAuditLog(befiterId: string): Promise<IdentityUpdate[]>;
   incrementDuplicatePrevention(): Promise<void>;
   getDashboardStats(): Promise<DashboardStats>;
-  searchIdentities(query: string, page: number, limit: number): Promise<{ results: BefiterIdWithLinks[]; total: number }>;
+  searchIdentities(query: string, page: number, limit: number): Promise<{ results: SerializedBefiterIdWithLinks[]; total: number }>;
   getAllApiKeys(): Promise<Omit<ApiKey, "keyHash">[]>;
   getApiKeyByPrefix(prefix: string): Promise<ApiKey | undefined>;
   createApiKey(appName: string, keyHash: string, keyPrefix: string): Promise<ApiKey>;
@@ -57,7 +73,7 @@ export interface IStorage {
   patchLead(id: string, data: PatchLead): Promise<Lead>;
   getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined>;
   searchLeads(query: string, page: number, limit: number): Promise<{ results: Lead[]; total: number }>;
-  lookupByAppUserId(appName: string, appUserId: string): Promise<BefiterIdWithLinks | undefined>;
+  lookupByAppUserId(appName: string, appUserId: string): Promise<SerializedBefiterIdWithLinks | undefined>;
   ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void>;
 }
 
@@ -76,10 +92,10 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
-  private async getIdentityWithLinks(befiterId: string): Promise<BefiterIdWithLinks> {
+  private async getIdentityWithLinks(befiterId: string): Promise<SerializedBefiterIdWithLinks> {
     const [identity] = await db.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
     const links = await db.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
-    return { ...identity, appLinks: links };
+    return serializeIdentity({ ...identity, appLinks: links });
   }
 
   async ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void> {
@@ -142,9 +158,9 @@ export class DatabaseStorage implements IStorage {
     return { identity: identityWithLinks, created: true };
   }
 
-  async updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<BefiterId> {
+  async updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks> {
     const [existing] = await db.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
-    if (!existing) throw new Error("Identity not found");
+    if (!existing) throw new IdentityNotFoundError();
 
     const auditEntries: { befiterId: string; appName: string; fieldChanged: string; oldValue: string | null; newValue: string | null }[] = [];
 
@@ -161,15 +177,14 @@ export class DatabaseStorage implements IStorage {
       await this.logAuditEntries(auditEntries);
     }
 
-    const [updated] = await db.update(befiterIds)
+    await db.update(befiterIds)
       .set({ ...data, updatedAt: new Date() })
-      .where(eq(befiterIds.id, befiterId))
-      .returning();
+      .where(eq(befiterIds.id, befiterId));
 
-    return updated;
+    return this.getIdentityWithLinks(befiterId);
   }
 
-  async patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<BefiterId> {
+  async patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks> {
     const [existing] = await db.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
     if (!existing) throw new IdentityNotFoundError();
 
@@ -179,14 +194,14 @@ export class DatabaseStorage implements IStorage {
     }
 
     const auditEntries: { befiterId: string; appName: string; fieldChanged: string; oldValue: string | null; newValue: string | null }[] = [];
-    const dbUpdate: Partial<BefiterId> & { previousPhones?: unknown } = {};
+    const dbUpdate: Record<string, unknown> = {};
 
     const { phone, email, ...rest } = data;
 
     if (phone && phone !== existing.currentPhone) {
       const oldPhone = existing.currentPhone;
       dbUpdate.currentPhone = phone;
-      dbUpdate.previousPhones = sql`array_append(${befiterIds.previousPhones}, ${oldPhone}::text)` as unknown as string[];
+      dbUpdate.previousPhones = sql`array_append(${befiterIds.previousPhones}, ${oldPhone}::text)`;
       auditEntries.push(
         { befiterId, appName, fieldChanged: "currentPhone", oldValue: oldPhone, newValue: phone },
         { befiterId, appName, fieldChanged: "previousPhones",
@@ -207,36 +222,34 @@ export class DatabaseStorage implements IStorage {
       const oldStr = oldVal === null || oldVal === undefined ? null : String(oldVal);
       const newStr = newVal === null ? null : String(newVal);
       if (oldStr !== newStr) {
-        (dbUpdate as Record<string, unknown>)[field] = newVal;
+        dbUpdate[field] = newVal;
         auditEntries.push({ befiterId, appName, fieldChanged: field, oldValue: oldStr, newValue: newStr });
       }
     }
 
     if (auditEntries.length > 0) await this.logAuditEntries(auditEntries);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const [updated] = await db.update(befiterIds)
-      .set({ ...dbUpdate, updatedAt: new Date() } as any)
-      .where(eq(befiterIds.id, befiterId))
-      .returning();
+    dbUpdate.updatedAt = new Date();
+    await db.update(befiterIds)
+      .set(dbUpdate)
+      .where(eq(befiterIds.id, befiterId));
 
-    return updated;
+    return this.getIdentityWithLinks(befiterId);
   }
 
-  async adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<BefiterId> {
+  async adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<SerializedBefiterIdWithLinks> {
     const { id, createdAt, identityTag, previousPhones, ...updateData } = data as BefiterId;
-    const [updated] = await db.update(befiterIds)
+    await db.update(befiterIds)
       .set({ ...updateData, updatedAt: new Date() })
-      .where(eq(befiterIds.id, befiterId))
-      .returning();
-    return updated;
+      .where(eq(befiterIds.id, befiterId));
+    return this.getIdentityWithLinks(befiterId);
   }
 
-  async getIdentity(befiterId: string): Promise<BefiterIdWithLinks | undefined> {
+  async getIdentity(befiterId: string): Promise<SerializedBefiterIdWithLinks | undefined> {
     const [identity] = await db.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
     if (!identity) return undefined;
     const links = await db.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
-    return { ...identity, appLinks: links };
+    return serializeIdentity({ ...identity, appLinks: links });
   }
 
   async linkApp(befiterId: string, appName: string, appUserId: string): Promise<AppLink> {
@@ -287,7 +300,7 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async searchIdentities(query: string, page: number, limit: number): Promise<{ results: BefiterIdWithLinks[]; total: number }> {
+  async searchIdentities(query: string, page: number, limit: number): Promise<{ results: SerializedBefiterIdWithLinks[]; total: number }> {
     const offset = (page - 1) * limit;
 
     const whereClause = query
@@ -306,10 +319,10 @@ export class DatabaseStorage implements IStorage {
       ? await db.select().from(befiterIds).where(whereClause).limit(limit).offset(offset).orderBy(sql`${befiterIds.createdAt} DESC`)
       : await db.select().from(befiterIds).limit(limit).offset(offset).orderBy(sql`${befiterIds.createdAt} DESC`);
 
-    const results: BefiterIdWithLinks[] = await Promise.all(
+    const results: SerializedBefiterIdWithLinks[] = await Promise.all(
       rows.map(async (row) => {
         const links = await db.select().from(appLinks).where(eq(appLinks.befiterId, row.id));
-        return { ...row, appLinks: links };
+        return serializeIdentity({ ...row, appLinks: links });
       })
     );
 
@@ -370,7 +383,7 @@ export class DatabaseStorage implements IStorage {
     return result;
   }
 
-  async lookupByAppUserId(appName: string, appUserId: string): Promise<BefiterIdWithLinks | undefined> {
+  async lookupByAppUserId(appName: string, appUserId: string): Promise<SerializedBefiterIdWithLinks | undefined> {
     const [link] = await db.select().from(appLinks)
       .where(and(eq(appLinks.appName, appName), eq(appLinks.appUserId, appUserId)))
       .limit(1);

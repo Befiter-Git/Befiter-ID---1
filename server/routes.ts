@@ -202,7 +202,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       if (identity) {
         await storage.incrementDuplicatePrevention();
-        return res.json({ found: true, matched_by: matchedBy, identity });
+        const fullIdentity = await storage.getIdentity(identity.id);
+        return res.json({ found: true, matched_by: matchedBy, identity: fullIdentity });
       }
 
       return res.json({ found: false });
@@ -354,7 +355,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
 
-      const updated = await storage.patchIdentity(req.params.id, parseResult.data, req.appName!);
+      const data = { ...parseResult.data };
+      if (data.phone) {
+        data.phone = normalisePhone(data.phone);
+      }
+
+      const updated = await storage.patchIdentity(req.params.id, data, req.appName!);
       return res.json({ identity: updated });
     } catch (err) {
       if (err instanceof IdentityNotFoundError || (err as { code?: string })?.code === "IDENTITY_NOT_FOUND") {
@@ -383,8 +389,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(409).json({ error: "This app is already linked to this identity" });
       }
 
-      const link = await storage.linkApp(req.params.befiterId, req.appName!, appUserId);
-      return res.status(201).json({ link });
+      await storage.linkApp(req.params.befiterId, req.appName!, appUserId);
+      const identity = await storage.getIdentity(req.params.befiterId);
+      return res.status(201).json({ identity });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to link app" });
@@ -410,7 +417,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!parseResult.success) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
-      const lead = await storage.createLead(parseResult.data);
+      const data = { ...parseResult.data, phone: normalisePhone(parseResult.data.phone) };
+      const lead = await storage.createLead(data);
       return res.status(201).json(lead);
     } catch (err: any) {
       if (err?.code === "23505") {
@@ -427,7 +435,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!parseResult.success) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
-      const lead = await storage.patchLead(req.params.id, parseResult.data);
+      const data = { ...parseResult.data };
+      if (data.phone) {
+        data.phone = normalisePhone(data.phone);
+      }
+      const lead = await storage.patchLead(req.params.id, data);
       return res.json(lead);
     } catch (err) {
       if (err instanceof LeadNotFoundError) {

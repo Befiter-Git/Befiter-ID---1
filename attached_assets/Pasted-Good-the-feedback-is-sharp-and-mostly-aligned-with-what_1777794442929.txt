@@ -1,0 +1,30 @@
+Good — the feedback is sharp and mostly aligned with what I proposed. Let me close the loop.
+
+Where I agree (most of it)
+Their point	My response
+Skip reconciliation poll on day 1	✅ Agreed. Add later only if we observe drift in production. Saves real build time.
+Confirm /api/s2s/member?befiterId=… lives on store	✅ Agreed. We use it today (store-sync-service.ts:17 + memberAuth.ts:455) and it's already pointed at BEFITER_STORE_URL, so it does live on store. Just needs documenting in the contract.
+com → store reverse flow is required	✅ Strongly agree. Without it, bookings made on com are invisible to studios → capacity collapses. Must be its own channel.
+Approach A is over-engineered	⚠️ Slight clarification: I already recommended hybrid (mirror tables for memberships/bookings, event log for attendance/check-ins). Their critique reads as if I proposed pure A. We're actually saying the same thing.
+Unify signing standard with Befiter ID webhooks	✅ Agreed. One verification helper, one envelope, three sources.
+Retention: memberships forever, activity 18 months	✅ Agreed. Memberships have legal/financial weight; activity is analytics.
+Locked decisions on the 6 open questions
+#	Question	Locked answer
+1	Mirror vs event log?	Hybrid: side tables for memberships + bookings; event log for attendance + check-ins
+2	Freshness SLA?	<1 sec webhook, no poll on day one
+3	Retention?	Memberships forever; bookings/attendance/check-ins 18 months rolling
+4	Multi-studio?	Yes — studioId on each membership row
+5	com → store reverse flow?	Yes — separate webhook channel, same envelope/signing
+6	Sandbox/staging?	Yes — separate URLs + secrets per environment from day one
+The trimmed scope (3 phases instead of 4)
+Phase	Scope	Depends on store?
+P0	Master Integration Contract document covering store→com, com→store, and befiter.id→com webhooks. One envelope, one signing standard, one retry policy, one event catalog.	No — we draft, both teams review
+P1	Webhook receiver: signature verify, dedup via webhook_events table, push-then-ack. Accept and log all events; processing is stubbed at first.	Needs store sending test webhooks
+P2	Domain handlers in priority order — memberships → bookings → freezes → attendance → check-ins. Mirror tables for the first two; event log for the last two. Plus the com → store outbound publisher (sends booking.created etc. to store).	Needs store ready to receive on their side too
+Reconciliation poll is parked. Picked up only if drift is observed.
+
+Three concrete next moves you can pick from
+I draft the unified Integration Contract right here in chat (one document covering all three webhook channels — store→com, com→store, id→com). You copy it and send to both teams. Same shape as the Befiter ID guide they already accepted.
+I draft a reply to the store team locking the 6 decisions and trimming the plan, before we write the contract.
+Move 3 (their recommendation): I do both — short reply first confirming decisions, then the full contract.
+I'd recommend Move 3 — but the reply is small and the contract is the real deliverable, so we can also just go straight to Move 1 (the contract) and skip the back-and-forth.

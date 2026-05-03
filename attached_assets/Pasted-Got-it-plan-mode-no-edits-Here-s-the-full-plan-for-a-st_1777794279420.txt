@@ -1,0 +1,118 @@
+Got it — plan mode, no edits. Here's the full plan for a strong, reliable data pipeline from befiter.store → befiter.com covering memberships, freezes, upgrades, bookings, attendance, and check-ins.
+
+🏗️ Recommended architecture: Webhook + Reconciliation Poll (hybrid)
+This is the same pattern used by Stripe, Shopify, Linear, GitHub — proven at scale. Single mechanisms (pure webhook OR pure polling) each have failure modes; combining them is what makes it bulletproof.
+
+                  ┌─────────────────┐
+                  │  befiter.store  │  (event source of truth)
+                  └────────┬────────┘
+                           │
+        ┌──────────────────┴──────────────────┐
+        ▼                                     ▼
+   1. WEBHOOK (real-time, < 1 sec)      2. RECONCILIATION POLL (safety net, every 30 min)
+   POST /api/webhooks/befiter-store     GET /api/s2s/member?befiterId=… (we already have this)
+        │                                     │
+        └──────────────────┬──────────────────┘
+                           ▼
+                  ┌─────────────────┐
+                  │  befiter.com    │
+                  │  (event log +   │
+                  │   local cache)  │
+                  └─────────────────┘
+
+Why hybrid (not just webhook)
+A webhook can be missed (network blip, our server restarting, store retry exhausted).
+The 30-min reconciliation poll guarantees that within ~30 min the local copy matches store, even if every webhook for that member failed.
+For active members the user-perceived freshness is still real-time (webhooks deliver in seconds); the poll is invisible insurance.
+📨 Event catalog (the contract we'd ask store to implement)
+A single endpoint, one envelope shape, multiple eventType values:
+
+Event type	Triggered when	Critical fields in data
+membership.created	New membership purchased	serviceAccessId, planName, startDate, endDate, price, studioId, studioName
+membership.upgraded	Plan change (paid up)	serviceAccessId, oldPlan, newPlan, priceDelta, effectiveDate
+membership.renewed	Renewal	serviceAccessId, newEndDate
+membership.cancelled	Manual cancel	serviceAccessId, reason, effectiveDate
+membership.expired	Auto on expiry date	serviceAccessId
+freeze.applied	Freeze starts	serviceAccessId, freezeStartDate, freezeEndDate, reason, daysFrozen
+freeze.removed	Unfreeze (early or auto)	serviceAccessId, actualEndDate, daysUsed
+booking.created	Class/PT slot booked	bookingId, classId, className, instructor, slotStart, slotEnd, studioId
+booking.cancelled	Cancellation	bookingId, reason, cancelledAt
+booking.rescheduled	Time change	bookingId, oldSlot, newSlot
+attendance.marked	Class actually attended	bookingId, classId, markedAt, lateMinutes
+attendance.no_show	Marked no-show	bookingId, classId
+checkin.recorded	Facility check-in (walk-in or scan)	studioId, checkinAt, method (qr, manual, kiosk)
+checkout.recorded	Optional facility check-out	studioId, checkoutAt
+Standard envelope (every event has this shape)
+{
+  "eventId": "evt_01HX8K…",
+  "eventType": "membership.created",
+  "occurredAt": "2026-05-03T10:00:00Z",
+  "version": 1,
+  "befiterId": "abc-123",
+  "studioId": "studio-andheri",
+  "data": { …event-specific… }
+}
+
+Required headers
+Header	Purpose
+X-Befiter-Store-Event-Id	Idempotency key (matches eventId)
+X-Befiter-Store-Signature: sha256=…	HMAC of raw body using shared secret
+X-Befiter-Store-Timestamp	Unix epoch — we reject events > 5 min old (replay protection)
+🛠️ What we build on the befiter.com side (3 layers)
+Layer 1: The webhook receiver (POST /api/webhooks/befiter-store)
+HMAC signature verification (constant-time compare)
+Timestamp window check (reject stale)
+eventId deduplication via a new webhook_events table with unique index
+Push-then-ack pattern: write event to durable log first, return 200 immediately, process async — so a slow handler can't cause the store to retry-storm us
+Rate limiter
+Layer 2: Event log + per-event handlers
+New table webhook_events — every event ever received, full payload, processing status (received / processed / failed / dead), retry count, error
+One handler function per eventType, all in server/api/webhooks/befiter-store-handlers.ts
+Each handler is idempotent — running it twice on the same event yields the same result
+Layer 3: Local domain tables (the data the UI reads)
+We'd extend the local schema to mirror the store data we care about. Two options:
+
+Approach	Pros	Cons
+A. Side tables per concept (member_memberships, member_freezes, member_bookings, member_attendance, member_checkins)	Queryable, indexable, joinable. Powers dashboard widgets, history pages, analytics.	More schema; needs migrations.
+B. Single member_events table with JSON payload	Minimal schema. Append-only audit log.	Hard to query ("show my last 5 bookings" needs JSON path queries).
+My strong recommendation: A for memberships/freezes/bookings (frequently queried), B for attendance/check-ins as audit log + a denormalized "last_checkin_at" on member_profiles for the card.
+
+Layer 4: Reconciliation poll
+Cron every 30 min walks every member with an active befiterId and calls /api/s2s/member?befiterId=X
+Compares to local cache; if anything differs, treats it as a synthetic event and runs the same handler logic (so any drift gets repaired, missed events recovered)
+Backs off members with no recent activity to save calls
+🧾 What we need from the befiter.store team (their side of the contract)
+This is where I want to be very clear: we cannot make this real-time without their cooperation. They need to ship their half of the wire. Specifically:
+
+Requirement	Why
+Implement webhook delivery on every event listed above	Real-time push
+Sign every webhook with HMAC-SHA256 of body using a shared secret	Security
+Include eventId, occurredAt, version in envelope	Idempotency + ordering
+Implement retries: 1s, 5s, 30s, 5m, 1h, 6h, 24h on non-2xx	Resilience to com being briefly down
+Provide a webhook secret per environment (dev/staging/prod)	Key rotation safety
+Provide a "replay" admin endpoint to resend an event	Debugging + recovery
+Continue exposing /api/s2s/member?befiterId=… (already exists)	Reconciliation poll
+Optionally: bulk-fetch endpoints (/api/s2s/member/{id}/bookings?since=…) for fast initial backfill	First-time sync of historical data
+I'd recommend we draft this as a formal Integration Contract document (mirror of the Befiter ID guide you already received) and send it to the store team for sign-off before either side writes code.
+
+🚦 Phased rollout plan
+I'd suggest 4 phases, each independently shippable:
+
+Phase	Goal	Approx work	Depends on store team?
+P0	Draft Integration Contract document, send to store team, agree on events/envelope/secrets	1 doc	No (we draft, they review)
+P1	Build receiver skeleton: endpoint, HMAC verify, webhook_events log, dedup. Accept any event, just log it.	Medium	Needs store to send TEST webhooks
+P2	Build domain tables + per-event handlers (memberships → freezes → bookings → attendance → check-ins, in that order of importance)	Large	Needs store sending real events
+P3	Reconciliation poll cron + admin tools (replay endpoint, dashboard for failed events)	Small	No
+You can also decide to do P1 with a stub event source (a fake admin endpoint we trigger manually) so the receiver is fully built and tested before the store team is ready — that way nothing blocks on them.
+
+❓ Open decisions you need to make before we start
+These are product/architecture calls only you can make:
+
+Do we mirror data into proper tables (Approach A) or a single event log (B)? I recommend A for the queryable concepts.
+What is the freshness SLA? "<1 second via webhook, ≤30 min worst case via poll" is what I'd propose. Tighter polls cost more.
+What history depth do we keep? Forever? 1 year? Last 100 events per member? Affects table size.
+One studio or multi-studio per member? Affects whether studioId is on the membership row or implied by membership.
+Do bookings on com → store also need to flow? The user implicitly asked only for store → com. Worth confirming whether members can book ON com (going the other direction needs a separate plan).
+Sandbox / staging environment? If store has a staging URL we should use that for dev.
+📋 Want me to turn this into project tasks?
+I can drop the work into project_tasks so it's tracked persistently, broken into the four phases above. Each task would have its own dependency chain. You'd then assign each one to me or to a task agent (your choice) when ready to execute.
