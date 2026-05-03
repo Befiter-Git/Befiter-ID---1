@@ -5,6 +5,17 @@ export interface DashboardStats {
   thisMonth: number;
   appBreakdown: { appName: string; count: number }[];
   duplicatePrevention: number;
+  leads: {
+    total: number;
+    thisMonth: number;
+    byStatus: { status: string; count: number }[];
+    followUpsDue: number;
+  };
+  webhooks: {
+    pending: number;
+    dead: number;
+    deliveredLast24h: number;
+  };
 }
 
 export interface ApiKeyRecord {

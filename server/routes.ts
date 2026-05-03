@@ -494,14 +494,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if ((req.headers["accept"] || "").startsWith("text/html")) return next();
     try {
       const query = (req.query.q as string) || "";
+      const status = (req.query.status as string) || "";
       const page = parseInt((req.query.page as string) || "1", 10);
       const limit = parseInt((req.query.limit as string) || "50", 10);
-      const result = await storage.searchLeads(query, page, limit);
+      const result = await storage.searchLeads(query, page, limit, status || undefined);
       return res.json(result);
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to fetch leads" });
     }
+  });
+
+  app.get("/admin/lead/:id", requireAdminSession, async (req: Request, res: Response, next) => {
+    if ((req.headers["accept"] || "").startsWith("text/html")) return next();
+    try {
+      const lead = await storage.getLeadById(req.params.id as string);
+      if (!lead) return res.status(404).json({ error: "Lead not found", code: "LEAD_NOT_FOUND" });
+      return res.json(lead);
+    } catch (err) { next(err); }
   });
 
   return httpServer;

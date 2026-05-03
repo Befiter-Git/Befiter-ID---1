@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Users, UserPlus, Shield, Link2 } from "lucide-react";
+import { Users, UserPlus, Shield, Link2, UserSearch, Flame, CalendarClock, Send, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { AdminLayout } from "@/components/layout/admin-layout";
 import { StatCard } from "@/components/stats/stat-card";
 import { AppBreakdownChart } from "@/components/stats/app-breakdown-chart";
@@ -64,6 +64,74 @@ export default function Dashboard() {
             isLoading={isLoading}
             testId="stat-duplicates-prevented"
           />
+        </div>
+
+        <div>
+          <h2 className="text-sm font-semibold text-muted-foreground mb-3">Leads</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+            <StatCard
+              title="Total Leads"
+              value={data?.leads.total ?? 0}
+              icon={UserSearch}
+              description="All leads in the system"
+              isLoading={isLoading}
+              testId="stat-total-leads"
+            />
+            <StatCard
+              title="Leads This Month"
+              value={data?.leads.thisMonth ?? 0}
+              icon={UserPlus}
+              description="New leads created this month"
+              isLoading={isLoading}
+              testId="stat-leads-this-month"
+            />
+            <StatCard
+              title="Hot Leads"
+              value={data?.leads.byStatus.find(s => s.status === "hot")?.count ?? 0}
+              icon={Flame}
+              description="Currently marked as hot"
+              isLoading={isLoading}
+              testId="stat-hot-leads"
+            />
+            <StatCard
+              title="Follow-ups Due"
+              value={data?.leads.followUpsDue ?? 0}
+              icon={CalendarClock}
+              description="Open leads with follow-up date passed"
+              isLoading={isLoading}
+              testId="stat-followups-due"
+            />
+          </div>
+        </div>
+
+        <div>
+          <h2 className="text-sm font-semibold text-muted-foreground mb-3">Outbound Webhooks</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <StatCard
+              title="Pending"
+              value={data?.webhooks.pending ?? 0}
+              icon={Send}
+              description="Queued for delivery or retry"
+              isLoading={isLoading}
+              testId="stat-webhooks-pending"
+            />
+            <StatCard
+              title="Dead"
+              value={data?.webhooks.dead ?? 0}
+              icon={AlertTriangle}
+              description="Failed all retries — needs attention"
+              isLoading={isLoading}
+              testId="stat-webhooks-dead"
+            />
+            <StatCard
+              title="Delivered (24h)"
+              value={data?.webhooks.deliveredLast24h ?? 0}
+              icon={CheckCircle2}
+              description="Successfully sent in last 24 hours"
+              isLoading={isLoading}
+              testId="stat-webhooks-delivered"
+            />
+          </div>
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">

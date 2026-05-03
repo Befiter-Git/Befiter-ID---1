@@ -1,15 +1,18 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { Search } from "lucide-react";
 import { AdminLayout } from "@/components/layout/admin-layout";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAdminAuth } from "@/hooks/use-admin-auth";
 import { format } from "date-fns";
 import type { Lead } from "@shared/schema";
+
+const STATUS_OPTIONS = ["all", "cold", "warm", "hot", "converted", "lost"];
 
 const STATUS_STYLES: Record<string, string> = {
   cold: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300",
@@ -30,15 +33,22 @@ function StatusBadge({ status }: { status: string }) {
 
 export default function Leads() {
   const { isLoading: authLoading, isAuthenticated } = useAdminAuth();
+  const [, setLocation] = useLocation();
   const [searchInput, setSearchInput] = useState("");
   const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
   const [page, setPage] = useState(1);
   const limit = 50;
 
   const { data, isLoading } = useQuery<{ results: Lead[]; total: number }>({
-    queryKey: ["/admin/leads", query, page],
+    queryKey: ["/admin/leads", query, statusFilter, page],
     queryFn: async () => {
-      const params = new URLSearchParams({ q: query, page: String(page), limit: String(limit) });
+      const params = new URLSearchParams({
+        q: query,
+        page: String(page),
+        limit: String(limit),
+      });
+      if (statusFilter !== "all") params.set("status", statusFilter);
       const res = await fetch(`/admin/leads?${params}`);
       if (!res.ok) throw new Error("Failed to fetch leads");
       return res.json();
@@ -70,6 +80,18 @@ export default function Leads() {
               className="pl-9"
             />
           </div>
+          <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v); setPage(1); }}>
+            <SelectTrigger className="w-40" data-testid="select-lead-status">
+              <SelectValue placeholder="All statuses" />
+            </SelectTrigger>
+            <SelectContent>
+              {STATUS_OPTIONS.map(s => (
+                <SelectItem key={s} value={s} data-testid={`option-status-${s}`}>
+                  {s === "all" ? "All statuses" : s.charAt(0).toUpperCase() + s.slice(1)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Button onClick={handleSearch} data-testid="button-leads-search">Search</Button>
         </div>
 
@@ -104,7 +126,12 @@ export default function Leads() {
                 </TableRow>
               ) : (
                 data?.results.map(lead => (
-                  <TableRow key={lead.id} data-testid={`row-lead-${lead.id}`}>
+                  <TableRow
+                    key={lead.id}
+                    data-testid={`row-lead-${lead.id}`}
+                    className="cursor-pointer hover:bg-muted/50"
+                    onClick={() => setLocation(`/admin/lead/${lead.id}`)}
+                  >
                     <TableCell className="font-medium" data-testid={`text-lead-name-${lead.id}`}>
                       {lead.fullName}
                     </TableCell>

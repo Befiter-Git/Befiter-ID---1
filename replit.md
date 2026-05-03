@@ -149,6 +149,14 @@ Whenever an identity is created, updated, or linked to an app, this service publ
 8. **Every field change logged** — one row per changed field in identity_updates
 9. **Duplicate prevention counter** — persisted in DB stats table
 
+## Leads & Dashboard (Step 4)
+
+- **Leads list** (`/admin/leads`): search by name/phone/email + status filter dropdown (all/cold/warm/hot/converted/lost), paginated, rows clickable to detail.
+- **Lead detail** (`/admin/lead/:id`): full lead view — contact, origin, interest & pricing, timeline.
+- **Dashboard**: extended with Lead stats section (Total, This Month, Hot, Follow-ups Due) and Outbound Webhooks section (Pending, Dead, Delivered last 24h).
+- **Endpoints**: `GET /admin/leads?q=&status=&page=&limit=`, `GET /admin/lead/:id`, `GET /admin/stats` (now also returns `leads` and `webhooks` blocks).
+- **Follow-ups Due** counts open (non-converted, non-lost) leads whose `follow_up_date` (text `YYYY-MM-DD`) is on or before today; non-ISO and empty values are excluded via regex guard before date cast.
+
 ## File Structure
 
 ```

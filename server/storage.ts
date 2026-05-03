@@ -59,6 +59,17 @@ export interface DashboardStats {
   thisMonth: number;
   appBreakdown: { appName: string; count: number }[];
   duplicatePrevention: number;
+  leads: {
+    total: number;
+    thisMonth: number;
+    byStatus: { status: string; count: number }[];
+    followUpsDue: number;
+  };
+  webhooks: {
+    pending: number;
+    dead: number;
+    deliveredLast24h: number;
+  };
 }
 
 export interface CreateOrUpdateResult {
@@ -105,7 +116,8 @@ export interface IStorage {
   createLead(data: InsertLead): Promise<Lead>;
   patchLead(id: string, data: PatchLead): Promise<Lead>;
   getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined>;
-  searchLeads(query: string, page: number, limit: number): Promise<{ results: Lead[]; total: number }>;
+  searchLeads(query: string, page: number, limit: number, status?: string): Promise<{ results: Lead[]; total: number }>;
+  getLeadById(id: string): Promise<Lead | undefined>;
   lookupByAppUserId(appName: string, appUserId: string): Promise<SerializedBefiterIdWithLinks | undefined>;
   ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void>;
   createWebhookEvent(data: { eventId: string; eventType: string; destination: WebhookDestination; payload: string }): Promise<WebhookEvent>;
@@ -390,12 +402,49 @@ export class DatabaseStorage implements IStorage {
 
     const [dupStat] = await db.select().from(stats).where(eq(stats.key, "duplicate_prevention_count")).limit(1);
 
+    const [leadsTotal] = await db.select({ count: sql<number>`count(*)::int` }).from(leads);
+    const [leadsMonth] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(leads).where(sql`${leads.createdAt} >= ${firstOfMonth}`);
+    const leadsByStatus = await db.select({
+      status: leads.leadStatus,
+      count: sql<number>`count(*)::int`,
+    }).from(leads).groupBy(leads.leadStatus);
+    const [followUps] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(leads).where(sql`${leads.followUpDate} IS NOT NULL
+        AND ${leads.followUpDate} <> ''
+        AND ${leads.followUpDate} ~ '^\\d{4}-\\d{2}-\\d{2}'
+        AND substring(${leads.followUpDate} from 1 for 10)::date <= current_date
+        AND ${leads.leadStatus} NOT IN ('converted','lost')`);
+
+    const [whPending] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(webhookEvents).where(eq(webhookEvents.status, "pending"));
+    const [whDead] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(webhookEvents).where(eq(webhookEvents.status, "dead"));
+    const [whDelivered] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(webhookEvents).where(sql`${webhookEvents.status} = 'success' AND ${webhookEvents.deliveredAt} >= now() - interval '24 hours'`);
+
     return {
       totalIds: totalResult.count,
       thisMonth: monthResult.count,
       appBreakdown: appBreakdown.map(r => ({ appName: r.appName, count: r.count })),
       duplicatePrevention: dupStat?.value ?? 0,
+      leads: {
+        total: leadsTotal.count,
+        thisMonth: leadsMonth.count,
+        byStatus: leadsByStatus.map(r => ({ status: r.status, count: r.count })),
+        followUpsDue: followUps.count,
+      },
+      webhooks: {
+        pending: whPending.count,
+        dead: whDead.count,
+        deliveredLast24h: whDelivered.count,
+      },
     };
+  }
+
+  async getLeadById(id: string): Promise<Lead | undefined> {
+    const [row] = await db.select().from(leads).where(eq(leads.id, id)).limit(1);
+    return row;
   }
 
   async searchIdentities(query: string, page: number, limit: number): Promise<{ results: SerializedBefiterIdWithLinks[]; total: number }> {
@@ -489,15 +538,19 @@ export class DatabaseStorage implements IStorage {
     return this.getIdentity(link.befiterId);
   }
 
-  async searchLeads(query: string, page: number, limit: number): Promise<{ results: Lead[]; total: number }> {
+  async searchLeads(query: string, page: number, limit: number, status?: string): Promise<{ results: Lead[]; total: number }> {
     const offset = (page - 1) * limit;
-    const whereClause = query
+    const searchClause = query
       ? or(
           ilike(leads.fullName, `%${query}%`),
           ilike(leads.phone, `%${query}%`),
           ilike(leads.email, `%${query}%`),
         )
       : undefined;
+    const statusClause = status ? eq(leads.leadStatus, status) : undefined;
+    const whereClause = searchClause && statusClause
+      ? and(searchClause, statusClause)
+      : (searchClause ?? statusClause);
 
     const [totalResult] = await db.select({ count: sql<number>`count(*)::int` })
       .from(leads)
