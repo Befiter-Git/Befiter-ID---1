@@ -126,9 +126,10 @@ export interface IStorage {
   updateApiKeyStatus(id: string, isActive: boolean): Promise<ApiKey>;
   deleteApiKey(id: string): Promise<void>;
   deleteIdentity(befiterId: string, adminUsername: string): Promise<void>;
-  createLead(data: InsertLead): Promise<Lead>;
-  patchLead(id: string, data: PatchLead): Promise<Lead>;
-  getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined>;
+  isAppLinked(befiterId: string, appName: string): Promise<boolean>;
+  createLead(data: InsertLead, appName: string): Promise<Lead>;
+  patchLead(id: string, data: PatchLead, appName: string): Promise<Lead>;
+  getLeadByStoreId(storeLeadId: string, appName: string): Promise<Lead | undefined>;
   searchLeads(query: string, page: number, limit: number, status?: string): Promise<{ results: Lead[]; total: number }>;
   getLeadById(id: string): Promise<Lead | undefined>;
   getMetrics(): Promise<MetricsData>;
@@ -655,24 +656,34 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
-  async createLead(data: InsertLead): Promise<Lead> {
-    const [lead] = await db.insert(leads).values(data).returning();
+  async isAppLinked(befiterId: string, appName: string): Promise<boolean> {
+    const [link] = await db.select().from(appLinks)
+      .where(and(eq(appLinks.befiterId, befiterId), eq(appLinks.appName, appName)))
+      .limit(1);
+    return !!link;
+  }
+
+  async createLead(data: InsertLead, appName: string): Promise<Lead> {
+    const [lead] = await db.insert(leads).values({ ...data, appName }).returning();
     return lead;
   }
 
-  async patchLead(id: string, data: PatchLead): Promise<Lead> {
-    const [existing] = await db.select().from(leads).where(eq(leads.id, id)).limit(1);
+  async patchLead(id: string, data: PatchLead, appName: string): Promise<Lead> {
+    const [existing] = await db.select().from(leads)
+      .where(and(eq(leads.id, id), eq(leads.appName, appName)))
+      .limit(1);
     if (!existing) throw new LeadNotFoundError();
+    const { appName: _stripped, ...safeData } = data as PatchLead & { appName?: unknown };
     const [updated] = await db.update(leads)
-      .set({ ...data, updatedAt: new Date() })
+      .set({ ...safeData, updatedAt: new Date() })
       .where(eq(leads.id, id))
       .returning();
     return updated;
   }
 
-  async getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined> {
+  async getLeadByStoreId(storeLeadId: string, appName: string): Promise<Lead | undefined> {
     const [result] = await db.select().from(leads)
-      .where(eq(leads.storeLeadId, storeLeadId))
+      .where(and(eq(leads.storeLeadId, storeLeadId), eq(leads.appName, appName)))
       .limit(1);
     return result;
   }

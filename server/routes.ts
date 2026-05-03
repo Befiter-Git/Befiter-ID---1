@@ -206,6 +206,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       if (identity) {
+        const linked = await storage.isAppLinked(identity.id, req.appName!);
+        if (!linked) {
+          return res.json({ found: false });
+        }
         await storage.incrementDuplicatePrevention();
         const fullIdentity = await storage.getIdentity(identity.id);
         return res.json({ found: true, matched_by: matchedBy, identity: fullIdentity });
@@ -292,7 +296,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (normalisedProfileData.email) {
         const byEmail = await storage.lookupByEmail(normalisedProfileData.email);
         if (byEmail) {
-          await storage.ensureAppLink(byEmail.id, appName, appUserId);
+          const alreadyLinked = await storage.isAppLinked(byEmail.id, appName);
+          if (!alreadyLinked) {
+            return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link" });
+          }
           if (Object.keys(normalisedProfileData).length > 0) {
             await storage.patchIdentity(byEmail.id, normalisedProfileData, appName);
           }
@@ -304,7 +311,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (normalisedProfileData.phone) {
         const byPhone = await storage.lookupByCurrentPhone(normalisedProfileData.phone);
         if (byPhone) {
-          await storage.ensureAppLink(byPhone.id, appName, appUserId);
+          const alreadyLinked = await storage.isAppLinked(byPhone.id, appName);
+          if (!alreadyLinked) {
+            return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link" });
+          }
           if (Object.keys(normalisedProfileData).length > 0) {
             await storage.patchIdentity(byPhone.id, normalisedProfileData, appName);
           }
@@ -339,6 +349,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const existing = await storage.getIdentity(req.params.befiterId);
       if (!existing) return res.status(404).json({ error: "Identity not found" });
+      const linked = existing.appLinks.some(l => l.appName === req.appName);
+      if (!linked) return res.status(403).json({ error: "Forbidden - identity not linked to your application" });
 
       const body = { ...req.body };
       delete body.currentPhone;
@@ -368,6 +380,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!parseResult.success) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
+      const linked = await storage.isAppLinked(req.params.id, req.appName!);
+      if (!linked) return res.status(403).json({ error: "Forbidden - identity not linked to your application" });
 
       const data = { ...parseResult.data };
       if (data.phone) {
@@ -397,9 +411,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const existing = await storage.getIdentity(req.params.befiterId);
       if (!existing) return res.status(404).json({ error: "Identity not found" });
 
-      const { appUserId } = req.body;
+      const { appUserId, email, phone } = req.body;
       if (!appUserId) {
         return res.status(400).json({ error: "appUserId is required" });
+      }
+      if (!email || !phone) {
+        return res.status(400).json({ error: "email and phone are required to verify identity ownership" });
+      }
+      if (!existing.email || email.toLowerCase() !== existing.email.toLowerCase()) {
+        return res.status(403).json({ error: "Forbidden - provided credentials do not match identity record" });
+      }
+      let normalisedLinkPhone: string;
+      try {
+        normalisedLinkPhone = normalisePhone(phone);
+      } catch {
+        return res.status(422).json({ error: "Invalid phone number" });
+      }
+      if (normalisedLinkPhone !== existing.currentPhone) {
+        return res.status(403).json({ error: "Forbidden - provided credentials do not match identity record" });
       }
 
       const alreadyLinked = existing.appLinks.find(l => l.appName === req.appName);
@@ -420,6 +449,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const identity = await storage.getIdentity(req.params.befiterId);
       if (!identity) return res.status(404).json({ error: "Identity not found" });
+      const linked = identity.appLinks.some(l => l.appName === req.appName);
+      if (!linked) return res.status(404).json({ error: "Identity not found" });
       return res.json({ identity });
     } catch (err) {
       console.error(err);
@@ -442,7 +473,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
       }
       const data = { ...parseResult.data, phone };
-      const lead = await storage.createLead(data);
+      const lead = await storage.createLead(data, req.appName!);
       return res.status(201).json(lead);
     } catch (err: any) {
       if (err?.code === "23505") {
@@ -467,7 +498,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
         }
       }
-      const lead = await storage.patchLead(req.params.id, data);
+      const lead = await storage.patchLead(req.params.id, data, req.appName!);
       return res.json(lead);
     } catch (err) {
       if (err instanceof LeadNotFoundError) {
@@ -482,7 +513,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const storeLeadId = req.query.storeLeadId as string;
       if (!storeLeadId) return res.status(400).json({ error: "storeLeadId query param is required" });
-      const lead = await storage.getLeadByStoreId(storeLeadId);
+      const lead = await storage.getLeadByStoreId(storeLeadId, req.appName!);
       if (!lead) return res.json({ found: false });
       return res.json({ found: true, lead });
     } catch (err) {
