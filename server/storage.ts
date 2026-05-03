@@ -72,6 +72,19 @@ export interface DashboardStats {
   };
 }
 
+export interface MetricsData {
+  identitiesPerDay: { day: string; count: number }[];
+  leadsPerDay: { day: string; count: number }[];
+  webhooksPerDay: { day: string; success: number; dead: number }[];
+  leadStatusBreakdown: { status: string; count: number }[];
+  leadConversionRate: number;
+  leadsTotal: number;
+  leadsConverted: number;
+  leadsLost: number;
+  webhookSuccessRate: number;
+  webhookTotal: number;
+}
+
 export interface CreateOrUpdateResult {
   identity: SerializedBefiterIdWithLinks;
   created: boolean;
@@ -118,6 +131,7 @@ export interface IStorage {
   getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined>;
   searchLeads(query: string, page: number, limit: number, status?: string): Promise<{ results: Lead[]; total: number }>;
   getLeadById(id: string): Promise<Lead | undefined>;
+  getMetrics(): Promise<MetricsData>;
   lookupByAppUserId(appName: string, appUserId: string): Promise<SerializedBefiterIdWithLinks | undefined>;
   ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void>;
   createWebhookEvent(data: { eventId: string; eventType: string; destination: WebhookDestination; payload: string }): Promise<WebhookEvent>;
@@ -439,6 +453,78 @@ export class DatabaseStorage implements IStorage {
         dead: whDead.count,
         deliveredLast24h: whDelivered.count,
       },
+    };
+  }
+
+  async getMetrics(): Promise<MetricsData> {
+    const identitiesPerDay = await db.execute(sql`
+      SELECT to_char(d::date, 'YYYY-MM-DD') AS day,
+             COALESCE((SELECT COUNT(*)::int FROM ${befiterIds}
+                       WHERE ${befiterIds.createdAt}::date = d::date), 0) AS count
+      FROM generate_series(current_date - interval '29 days', current_date, interval '1 day') d
+      ORDER BY day ASC
+    `);
+
+    const leadsPerDay = await db.execute(sql`
+      SELECT to_char(d::date, 'YYYY-MM-DD') AS day,
+             COALESCE((SELECT COUNT(*)::int FROM ${leads}
+                       WHERE ${leads.createdAt}::date = d::date), 0) AS count
+      FROM generate_series(current_date - interval '29 days', current_date, interval '1 day') d
+      ORDER BY day ASC
+    `);
+
+    const webhooksPerDay = await db.execute(sql`
+      SELECT to_char(d::date, 'YYYY-MM-DD') AS day,
+             COALESCE((SELECT COUNT(*)::int FROM ${webhookEvents}
+                       WHERE ${webhookEvents.deliveredAt}::date = d::date
+                         AND ${webhookEvents.status} = 'success'), 0) AS success,
+             COALESCE((SELECT COUNT(*)::int FROM ${webhookEvents}
+                       WHERE COALESCE(${webhookEvents.deliveredAt}, ${webhookEvents.createdAt})::date = d::date
+                         AND ${webhookEvents.status} = 'dead'), 0) AS dead
+      FROM generate_series(current_date - interval '13 days', current_date, interval '1 day') d
+      ORDER BY day ASC
+    `);
+
+    const leadStatusBreakdown = await db.select({
+      status: leads.leadStatus,
+      count: sql<number>`count(*)::int`,
+    }).from(leads).groupBy(leads.leadStatus);
+
+    const [convStats] = await db.select({
+      total: sql<number>`count(*)::int`,
+      converted: sql<number>`count(*) filter (where ${leads.leadStatus} = 'converted')::int`,
+      lost: sql<number>`count(*) filter (where ${leads.leadStatus} = 'lost')::int`,
+    }).from(leads);
+
+    const closed = (convStats?.converted ?? 0) + (convStats?.lost ?? 0);
+    const conversionRate = closed > 0 ? Math.round((convStats.converted / closed) * 1000) / 10 : 0;
+
+    const [whTotals] = await db.select({
+      total: sql<number>`count(*)::int`,
+      success: sql<number>`count(*) filter (where ${webhookEvents.status} = 'success')::int`,
+      dead: sql<number>`count(*) filter (where ${webhookEvents.status} = 'dead')::int`,
+    }).from(webhookEvents);
+
+    const finalised = (whTotals?.success ?? 0) + (whTotals?.dead ?? 0);
+    const webhookSuccessRate = finalised > 0 ? Math.round((whTotals.success / finalised) * 1000) / 10 : 100;
+
+    const toRows = (r: any): any[] => Array.isArray(r) ? r : (r?.rows ?? []);
+
+    return {
+      identitiesPerDay: toRows(identitiesPerDay).map((r: any) => ({ day: r.day, count: Number(r.count) })),
+      leadsPerDay: toRows(leadsPerDay).map((r: any) => ({ day: r.day, count: Number(r.count) })),
+      webhooksPerDay: toRows(webhooksPerDay).map((r: any) => ({
+        day: r.day,
+        success: Number(r.success),
+        dead: Number(r.dead),
+      })),
+      leadStatusBreakdown: leadStatusBreakdown.map(r => ({ status: r.status, count: r.count })),
+      leadConversionRate: conversionRate,
+      leadsTotal: convStats?.total ?? 0,
+      leadsConverted: convStats?.converted ?? 0,
+      leadsLost: convStats?.lost ?? 0,
+      webhookSuccessRate,
+      webhookTotal: whTotals?.total ?? 0,
     };
   }
 

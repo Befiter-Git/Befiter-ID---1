@@ -9,6 +9,7 @@ import Identities from "@/pages/identities";
 import IdentityProfile from "@/pages/identity-profile";
 import Leads from "@/pages/leads";
 import LeadDetail from "@/pages/lead-detail";
+import Metrics from "@/pages/metrics";
 import ApiKeys from "@/pages/api-keys";
 import NotFound from "@/pages/not-found";
 
@@ -22,6 +23,7 @@ function Router() {
       <Route path="/admin/identity/:befiterId" component={IdentityProfile} />
       <Route path="/admin/leads" component={Leads} />
       <Route path="/admin/lead/:id" component={LeadDetail} />
+      <Route path="/admin/metrics" component={Metrics} />
       <Route path="/admin/api-keys" component={ApiKeys} />
       <Route component={NotFound} />
     </Switch>

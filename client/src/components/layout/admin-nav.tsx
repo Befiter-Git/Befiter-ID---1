@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, Users, UserSearch, Key, LogOut } from "lucide-react";
+import { LayoutDashboard, Users, UserSearch, Key, LogOut, BarChart3 } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -8,6 +8,7 @@ const navItems = [
   { href: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/admin/identities", label: "Members", icon: Users },
   { href: "/admin/leads", label: "Leads", icon: UserSearch },
+  { href: "/admin/metrics", label: "Metrics", icon: BarChart3 },
   { href: "/admin/api-keys", label: "API Keys", icon: Key },
 ];
 

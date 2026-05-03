@@ -157,6 +157,18 @@ Whenever an identity is created, updated, or linked to an app, this service publ
 - **Endpoints**: `GET /admin/leads?q=&status=&page=&limit=`, `GET /admin/lead/:id`, `GET /admin/stats` (now also returns `leads` and `webhooks` blocks).
 - **Follow-ups Due** counts open (non-converted, non-lost) leads whose `follow_up_date` (text `YYYY-MM-DD`) is on or before today; non-ISO and empty values are excluded via regex guard before date cast.
 
+## Metrics (Step 5)
+
+- **Page**: `/admin/metrics` — trends + conversion + delivery health.
+- **Endpoint**: `GET /admin/metrics` returns:
+  - `identitiesPerDay` / `leadsPerDay` — 30-day series, gap-filled via `generate_series`
+  - `webhooksPerDay` — 14-day stacked series (success vs dead)
+  - `leadStatusBreakdown` — counts per status for pie chart
+  - `leadConversionRate` — converted ÷ (converted + lost) × 100, one decimal
+  - `webhookSuccessRate` — success ÷ (success + dead) × 100, one decimal (defaults 100% when no events)
+- **Charts**: recharts (LineChart, BarChart stacked, PieChart). All read CSS vars for theme parity.
+- **Date casting**: `created_at::date` and `delivered_at::date` so series rows match local-server day buckets.
+
 ## File Structure
 
 ```

@@ -505,6 +505,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/admin/metrics", requireAdminSession, async (_req: Request, res: Response, next) => {
+    try {
+      const metrics = await storage.getMetrics();
+      return res.json(metrics);
+    } catch (err) { next(err); }
+  });
+
   app.get("/admin/lead/:id", requireAdminSession, async (req: Request, res: Response, next) => {
     if ((req.headers["accept"] || "").startsWith("text/html")) return next();
     try {

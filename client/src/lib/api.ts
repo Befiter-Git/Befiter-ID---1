@@ -18,6 +18,19 @@ export interface DashboardStats {
   };
 }
 
+export interface MetricsData {
+  identitiesPerDay: { day: string; count: number }[];
+  leadsPerDay: { day: string; count: number }[];
+  webhooksPerDay: { day: string; success: number; dead: number }[];
+  leadStatusBreakdown: { status: string; count: number }[];
+  leadConversionRate: number;
+  leadsTotal: number;
+  leadsConverted: number;
+  leadsLost: number;
+  webhookSuccessRate: number;
+  webhookTotal: number;
+}
+
 export interface ApiKeyRecord {
   id: string;
   appName: string;
