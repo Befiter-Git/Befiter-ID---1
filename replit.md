@@ -99,6 +99,32 @@ All phones stored in E.164 format using libphonenumber-js, default region India 
   if `SESSION_SECRET` or `ADMIN_PASSWORD` are still defaults.
 - Admin session cookie now sets `sameSite: lax` (CSRF defence).
 
+## Outbound Webhooks v1.0 (Step 3)
+
+Whenever an identity is created, updated, or linked to an app, this service publishes a webhook to two downstream apps (`befiter.com` and `befiter.store`) using a durable outbox pattern.
+
+- **Outbox table**: `webhook_events` — one row per (event, destination). Status: `pending` → `success` | `dead`.
+- **Events emitted**: `identity.created`, `identity.updated` (with `changed_fields` array), `identity.app_linked`.
+- **Envelope**: `{ event_id, event_type, occurred_at, version: "1.0", source: "befiter.id", data }`.
+- **Signing**: HMAC-SHA256 over `<unix_ts>.<json_body>`, sent as `X-Befiter-Signature: v1,t=<ts>,sig=<hex>`.
+  Also sends `X-Befiter-Event-Id` (for idempotency on the receiver) and `X-Befiter-Event-Type`.
+- **Channels & secrets**:
+  - `com` channel uses `WEBHOOK_SECRET_ID_TO_COM` and `BEFITER_COM_WEBHOOK_URL`
+  - `store` channel uses `BEFITER_ID_WEBHOOK_SECRET` and `BEFITER_STORE_WEBHOOK_URL`
+  - If a channel's URL or secret is missing, events for it are recorded but skipped (`last_error: channel_not_configured`) and retried per the schedule.
+- **Worker**: runs every 30 s, claims due events (`status=pending AND next_attempt_at <= now()`), POSTs with 15 s timeout.
+- **Retry schedule**: 1 m → 5 m → 15 m → 1 h → 6 h, then `dead`. Retried automatically on 5xx, network errors, and any non-2xx.
+- **Admin UI hooks**: `GET /admin/webhooks?status=&limit=` lists events; `POST /admin/webhooks/:id/retry` requeues.
+
+### Required env vars for production
+
+| Variable | Purpose |
+|----------|---------|
+| `BEFITER_COM_WEBHOOK_URL` | Endpoint on befiter.com that receives events from .id |
+| `BEFITER_STORE_WEBHOOK_URL` | Endpoint on befiter.store that receives events from .id |
+| `WEBHOOK_SECRET_ID_TO_COM` | Shared HMAC secret with com team |
+| `BEFITER_ID_WEBHOOK_SECRET` | Shared HMAC secret with store team |
+
 ## Data Contract Guarantees (v1.0)
 
 - All identity-returning endpoints respond with the full `BefiterIdWithLinks` shape (identity fields + `appLinks` array)

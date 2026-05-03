@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { helmetMiddleware, corsMiddleware, redactPII, assertProductionConfig } from "./security";
+import { startWebhookWorker } from "./webhook-publisher";
 
 assertProductionConfig();
 
@@ -111,6 +112,8 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      startWebhookWorker();
+      log("webhook worker started");
     },
   );
 })();

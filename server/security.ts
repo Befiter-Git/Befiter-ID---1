@@ -1,6 +1,6 @@
 import helmet from "helmet";
 import cors from "cors";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import type { Request, Response } from "express";
 
 export const helmetMiddleware = helmet({
@@ -25,10 +25,10 @@ export const corsMiddleware = cors({
   allowedHeaders: ["Content-Type", "x-api-key", "Idempotency-Key", "Authorization"],
 });
 
-const apiKeyOrIp = (req: Request): string => {
+const apiKeyOrIp = (req: Request, res: Response): string => {
   const apiKey = req.headers["x-api-key"];
   if (typeof apiKey === "string" && apiKey) return `key:${apiKey}`;
-  return `ip:${req.ip ?? "unknown"}`;
+  return `ip:${ipKeyGenerator(req.ip ?? "unknown")}`;
 };
 
 const rlMessage = (limit: number) => ({
@@ -62,7 +62,7 @@ export const adminLoginLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: Request): string => `ip:${req.ip ?? "unknown"}`,
+  keyGenerator: (req: Request): string => `ip:${ipKeyGenerator(req.ip ?? "unknown")}`,
   message: { error: "Too many login attempts. Try again in 15 minutes.", code: "ADMIN_LOGIN_THROTTLED" },
   statusCode: 429,
 });

@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError } from "./storage";
+import { retryWebhookNow, isChannelConfigured } from "./webhook-publisher";
 import { apiKeyAuth } from "./auth";
 import { requireAdminSession, sessionMiddleware } from "./admin-auth";
 import { readRateLimiter, writeRateLimiter, adminLoginLimiter, apiError } from "./security";
@@ -464,6 +465,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ─── Leads Admin (dashboard) ──────────────────────────────────────────────
+
+  // ─── Admin Webhook Events ────────────────────────────────────────────────
+
+  app.get("/admin/webhooks", requireAdminSession, async (req: Request, res: Response, next) => {
+    try {
+      const status = typeof req.query.status === "string" ? req.query.status : undefined;
+      const limit = Math.min(parseInt(String(req.query.limit ?? "100"), 10) || 100, 500);
+      const events = await storage.listWebhookEvents(status, limit);
+      res.json({
+        events,
+        channels: {
+          com: { configured: isChannelConfigured("com") },
+          store: { configured: isChannelConfigured("store") },
+        },
+      });
+    } catch (err) { next(err); }
+  });
+
+  app.post("/admin/webhooks/:id/retry", requireAdminSession, async (req: Request, res: Response, next) => {
+    try {
+      await retryWebhookNow(req.params.id as string);
+      res.json({ ok: true });
+    } catch (err) { next(err); }
+  });
 
   app.get("/admin/leads", requireAdminSession, async (req: Request, res: Response, next) => {
     if ((req.headers["accept"] || "").startsWith("text/html")) return next();

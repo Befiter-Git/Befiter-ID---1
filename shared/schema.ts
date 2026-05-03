@@ -221,6 +221,29 @@ export type Lead = typeof leads.$inferSelect;
 export type InsertLead = z.infer<typeof insertLeadSchema>;
 export type PatchLead = z.infer<typeof patchLeadSchema>;
 
+export const webhookEvents = pgTable("webhook_events", {
+  id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
+  eventId: varchar("event_id", { length: 50 }).notNull().unique(),
+  eventType: text("event_type").notNull(),
+  destination: text("destination").notNull(),
+  payload: text("payload").notNull(),
+  status: text("status").notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+  deliveredAt: timestamp("delivered_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export type WebhookEvent = typeof webhookEvents.$inferSelect;
+export type WebhookStatus = "pending" | "success" | "failed" | "dead";
+export type WebhookDestination = "com" | "store";
+export type WebhookEventType =
+  | "identity.created"
+  | "identity.updated"
+  | "identity.app_linked";
+
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),
