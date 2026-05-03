@@ -1,6 +1,10 @@
-import { parsePhoneNumber, isValidPhoneNumber } from "libphonenumber-js";
+import { parsePhoneNumber } from "libphonenumber-js";
 
 export function normalisePhone(phone: string): string {
+  if (phone.length > 30) {
+    throw new Error("Phone number is too long");
+  }
+
   const cleaned = phone.trim().replace(/[\s\-().]/g, "");
 
   if (!cleaned) {
@@ -15,7 +19,7 @@ export function normalisePhone(phone: string): string {
       }
     } catch {
     }
-    return cleaned;
+    throw new Error("Invalid international phone number");
   }
 
   let withoutLeadingZero = cleaned;
@@ -32,5 +36,5 @@ export function normalisePhone(phone: string): string {
   } catch {
   }
 
-  return withCountryCode;
+  throw new Error("Invalid phone number");
 }

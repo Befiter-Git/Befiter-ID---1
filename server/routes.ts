@@ -57,8 +57,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if ((req.headers["accept"] || "").startsWith("text/html")) return next();
     try {
       const query = (req.query.q as string) || "";
-      const page = parseInt((req.query.page as string) || "1", 10);
-      const limit = parseInt((req.query.limit as string) || "50", 10);
+      const rawPage = parseInt((req.query.page as string) || "1", 10);
+      const rawLimit = parseInt((req.query.limit as string) || "50", 10);
+      const page = Math.max(1, isNaN(rawPage) ? 1 : rawPage);
+      const limit = Math.min(200, Math.max(1, isNaN(rawLimit) ? 50 : rawLimit));
       const result = await storage.searchIdentities(query, page, limit);
       return res.json(result);
     } catch (err) {
@@ -83,7 +85,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const existing = await storage.getIdentity(req.params.befiterId);
       if (!existing) return res.status(404).json({ error: "Identity not found" });
-      const updated = await storage.adminUpdateIdentity(req.params.befiterId, req.body);
+      const adminUsername = req.session.adminUsername || "admin";
+      const updated = await storage.adminUpdateIdentity(req.params.befiterId, req.body, adminUsername);
       return res.json({ identity: updated });
     } catch (err) {
       console.error(err);
@@ -95,7 +98,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const existing = await storage.getIdentity(req.params.befiterId);
       if (!existing) return res.status(404).json({ error: "Identity not found" });
-      await storage.deleteIdentity(req.params.befiterId);
+      const adminUsername = req.session.adminUsername || "admin";
+      await storage.deleteIdentity(req.params.befiterId, adminUsername);
       return res.json({ success: true });
     } catch (err) {
       console.error(err);
@@ -234,7 +238,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       const data = parseResult.data;
-      data.currentPhone = normalisePhone(data.currentPhone);
+      try {
+        data.currentPhone = normalisePhone(data.currentPhone);
+      } catch (phoneErr: any) {
+        return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
+      }
 
       const { appUserId } = req.body;
       if (!appUserId) {
@@ -263,9 +271,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       const { appUserId, ...profileData } = parseResult.data;
       const appName = req.appName!;
-      const normalisedProfileData = profileData.phone
-        ? { ...profileData, phone: normalisePhone(profileData.phone) }
-        : profileData;
+      let normalisedProfileData = profileData;
+      if (profileData.phone) {
+        try {
+          normalisedProfileData = { ...profileData, phone: normalisePhone(profileData.phone) };
+        } catch (phoneErr: any) {
+          return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
+        }
+      }
 
       const byAppUserId = await storage.lookupByAppUserId(appName, appUserId);
       if (byAppUserId) {
@@ -358,7 +371,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       const data = { ...parseResult.data };
       if (data.phone) {
-        data.phone = normalisePhone(data.phone);
+        try {
+          data.phone = normalisePhone(data.phone);
+        } catch (phoneErr: any) {
+          return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
+        }
       }
 
       const updated = await storage.patchIdentity(req.params.id, data, req.appName!);
@@ -418,7 +435,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!parseResult.success) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
-      const data = { ...parseResult.data, phone: normalisePhone(parseResult.data.phone) };
+      let phone: string;
+      try {
+        phone = normalisePhone(parseResult.data.phone);
+      } catch (phoneErr: any) {
+        return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
+      }
+      const data = { ...parseResult.data, phone };
       const lead = await storage.createLead(data);
       return res.status(201).json(lead);
     } catch (err: any) {
@@ -438,7 +461,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
       const data = { ...parseResult.data };
       if (data.phone) {
-        data.phone = normalisePhone(data.phone);
+        try {
+          data.phone = normalisePhone(data.phone);
+        } catch (phoneErr: any) {
+          return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
+        }
       }
       const lead = await storage.patchLead(req.params.id, data);
       return res.json(lead);
@@ -495,8 +522,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const query = (req.query.q as string) || "";
       const status = (req.query.status as string) || "";
-      const page = parseInt((req.query.page as string) || "1", 10);
-      const limit = parseInt((req.query.limit as string) || "50", 10);
+      const rawPage = parseInt((req.query.page as string) || "1", 10);
+      const rawLimit = parseInt((req.query.limit as string) || "50", 10);
+      const page = Math.max(1, isNaN(rawPage) ? 1 : rawPage);
+      const limit = Math.min(200, Math.max(1, isNaN(rawLimit) ? 50 : rawLimit));
       const result = await storage.searchLeads(query, page, limit, status || undefined);
       return res.json(result);
     } catch (err) {

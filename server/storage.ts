@@ -2,7 +2,7 @@ import { eq, ilike, or, and, sql, lte, desc, inArray } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { db } from "./db";
 import {
-  befiterIds, appLinks, apiKeys, identityUpdates, stats, leads, webhookEvents,
+  befiterIds, appLinks, apiKeys, identityUpdates, stats, leads, webhookEvents, adminAuditLog,
   type BefiterId, type InsertBefiterId, type UpdateBefiterId, type PatchBefiterId,
   type AppLink, type ApiKey, type IdentityUpdate, type BefiterIdWithLinks,
   type Lead, type InsertLead, type PatchLead,
@@ -112,7 +112,7 @@ export interface IStorage {
   createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<CreateOrUpdateResult>;
   updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks>;
   patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks>;
-  adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<SerializedBefiterIdWithLinks>;
+  adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>, adminUsername: string): Promise<SerializedBefiterIdWithLinks>;
   getIdentity(befiterId: string): Promise<SerializedBefiterIdWithLinks | undefined>;
   linkApp(befiterId: string, appName: string, appUserId: string): Promise<AppLink>;
   logAuditEntries(entries: { befiterId: string; appName: string; fieldChanged: string; oldValue: string | null; newValue: string | null }[]): Promise<void>;
@@ -125,7 +125,7 @@ export interface IStorage {
   createApiKey(appName: string, keyHash: string, keyPrefix: string): Promise<ApiKey>;
   updateApiKeyStatus(id: string, isActive: boolean): Promise<ApiKey>;
   deleteApiKey(id: string): Promise<void>;
-  deleteIdentity(befiterId: string): Promise<void>;
+  deleteIdentity(befiterId: string, adminUsername: string): Promise<void>;
   createLead(data: InsertLead): Promise<Lead>;
   patchLead(id: string, data: PatchLead): Promise<Lead>;
   getLeadByStoreId(storeLeadId: string): Promise<Lead | undefined>;
@@ -350,12 +350,41 @@ export class DatabaseStorage implements IStorage {
    });
   }
 
-  async adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>): Promise<SerializedBefiterIdWithLinks> {
-    const { id, createdAt, identityTag, previousPhones, ...updateData } = data as BefiterId;
-    await db.update(befiterIds)
-      .set({ ...updateData, updatedAt: new Date() })
-      .where(eq(befiterIds.id, befiterId));
-    return this.getIdentityWithLinks(befiterId);
+  async adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>, adminUsername: string): Promise<SerializedBefiterIdWithLinks> {
+    return await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
+      if (!existing) throw new IdentityNotFoundError();
+
+      const { id, createdAt, identityTag, previousPhones, ...updateData } = data as BefiterId;
+      const appName = `__admin__:${adminUsername}`;
+
+      const auditEntries: { befiterId: string; appName: string; fieldChanged: string; oldValue: string | null; newValue: string | null }[] = [];
+      const adminLogEntries: { action: string; befiterId: string; adminUsername: string; fieldChanged: string; oldValue: string | null; newValue: string | null }[] = [];
+
+      for (const [field, newVal] of Object.entries(updateData)) {
+        if (newVal === undefined) continue;
+        const oldVal = (existing as Record<string, unknown>)[field];
+        const oldStr = oldVal === null || oldVal === undefined ? null : String(oldVal);
+        const newStr = newVal === null || newVal === undefined ? null : String(newVal);
+        if (oldStr !== newStr) {
+          auditEntries.push({ befiterId, appName, fieldChanged: field, oldValue: oldStr, newValue: newStr });
+          adminLogEntries.push({ action: "identity.update", befiterId, adminUsername, fieldChanged: field, oldValue: oldStr, newValue: newStr });
+        }
+      }
+
+      if (auditEntries.length > 0) {
+        await tx.insert(identityUpdates).values(auditEntries);
+        await tx.insert(adminAuditLog).values(adminLogEntries);
+      }
+
+      await tx.update(befiterIds)
+        .set({ ...updateData, updatedAt: new Date() })
+        .where(eq(befiterIds.id, befiterId));
+
+      const [identityRow] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
+      const links = await tx.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
+      return serializeIdentity({ ...identityRow, appLinks: links });
+    });
   }
 
   async getIdentity(befiterId: string): Promise<SerializedBefiterIdWithLinks | undefined> {
@@ -588,10 +617,42 @@ export class DatabaseStorage implements IStorage {
     await db.delete(apiKeys).where(eq(apiKeys.id, id));
   }
 
-  async deleteIdentity(befiterId: string): Promise<void> {
-    await db.delete(identityUpdates).where(eq(identityUpdates.befiterId, befiterId));
-    await db.delete(appLinks).where(eq(appLinks.befiterId, befiterId));
-    await db.delete(befiterIds).where(eq(befiterIds.id, befiterId));
+  async deleteIdentity(befiterId: string, adminUsername: string): Promise<void> {
+    await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
+
+      // Archive the full mutation history to admin_audit_log before deletion
+      // so per-field change records survive even after identity_updates rows are removed
+      const history = await tx.select().from(identityUpdates).where(eq(identityUpdates.befiterId, befiterId));
+      const archiveRows = history.map(row => ({
+        action: "identity.history" as const,
+        befiterId,
+        adminUsername,
+        fieldChanged: row.fieldChanged,
+        oldValue: row.oldValue,
+        newValue: row.newValue,
+        occurredAt: row.changedAt ?? undefined,
+      }));
+
+      // Add a tombstone entry recording who deleted the identity and when
+      archiveRows.push({
+        action: "identity.delete",
+        befiterId,
+        adminUsername,
+        fieldChanged: null,
+        oldValue: existing
+          ? JSON.stringify({ fullName: existing.fullName, email: existing.email, currentPhone: existing.currentPhone })
+          : null,
+        newValue: null,
+        occurredAt: undefined,
+      });
+
+      await tx.insert(adminAuditLog).values(archiveRows);
+
+      await tx.delete(identityUpdates).where(eq(identityUpdates.befiterId, befiterId));
+      await tx.delete(appLinks).where(eq(appLinks.befiterId, befiterId));
+      await tx.delete(befiterIds).where(eq(befiterIds.id, befiterId));
+    });
   }
 
   async createLead(data: InsertLead): Promise<Lead> {

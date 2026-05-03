@@ -3,6 +3,17 @@ import { pgTable, text, varchar, boolean, timestamp, date, numeric, integer } fr
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+export const adminAuditLog = pgTable("admin_audit_log", {
+  id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
+  action: text("action").notNull(),
+  befiterId: text("befiter_id").notNull(),
+  adminUsername: text("admin_username").notNull(),
+  fieldChanged: text("field_changed"),
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  occurredAt: timestamp("occurred_at").defaultNow(),
+});
+
 export const befiterIds = pgTable("befiter_ids", {
   id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
   fullName: text("full_name").notNull(),
@@ -77,9 +88,26 @@ export const insertBefiterIdSchema = createInsertSchema(befiterIds).omit({
   identityTag: true,
   previousPhones: true,
 }).extend({
-  fullName: z.string().min(1, "Full name is required"),
-  currentPhone: z.string().min(1, "Phone is required"),
-  email: z.string().email("Valid email is required"),
+  fullName: z.string().min(1, "Full name is required").max(200),
+  currentPhone: z.string().min(1, "Phone is required").max(30),
+  email: z.string().email("Valid email is required").max(254),
+  profilePhoto: z.string().max(2048).optional(),
+  country: z.string().max(100).optional(),
+  state: z.string().max(100).optional(),
+  city: z.string().max(100).optional(),
+  pincode: z.string().max(20).optional(),
+  locality: z.string().max(200).optional(),
+  occupation: z.string().max(100).optional(),
+  maritalStatus: z.string().max(50).optional(),
+  emergencyContactName: z.string().max(200).optional(),
+  emergencyContactPhone: z.string().max(30).optional(),
+  emergencyContactRelationship: z.string().max(100).optional(),
+  landmark: z.string().max(200).optional(),
+  bloodGroup: z.string().max(10).optional(),
+  medicalHistory: z.string().max(5000).optional(),
+  injuries: z.string().max(5000).optional(),
+  healthConditions: z.string().max(5000).optional(),
+  gender: z.string().max(50).optional(),
 });
 
 export const VALID_FITNESS_GOALS = [
@@ -102,37 +130,56 @@ export const updateBefiterIdSchema = createInsertSchema(befiterIds).omit({
   updatedAt: true,
   identityTag: true,
 }).partial().extend({
+  fullName: z.string().min(1).max(200).optional(),
+  profilePhoto: z.string().max(2048).optional(),
+  country: z.string().max(100).optional(),
+  state: z.string().max(100).optional(),
+  city: z.string().max(100).optional(),
+  pincode: z.string().max(20).optional(),
+  locality: z.string().max(200).optional(),
+  occupation: z.string().max(100).optional(),
+  maritalStatus: z.string().max(50).optional(),
+  emergencyContactName: z.string().max(200).optional(),
+  emergencyContactPhone: z.string().max(30).optional(),
+  emergencyContactRelationship: z.string().max(100).optional(),
+  landmark: z.string().max(200).optional(),
+  languagePreference: z.string().min(2).max(10).optional(),
+  bloodGroup: z.string().max(10).optional(),
+  medicalHistory: z.string().max(5000).optional(),
+  injuries: z.string().max(5000).optional(),
+  healthConditions: z.string().max(5000).optional(),
+  gender: z.string().max(50).optional(),
   dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
   anniversary: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
   fitnessGoals: z.array(z.enum(VALID_FITNESS_GOALS)).optional(),
 });
 
 export const patchBefiterIdSchema = z.object({
-  fullName: z.string().min(1).optional(),
-  phone: z.string().min(1).optional(),
-  email: z.string().email().optional(),
+  fullName: z.string().min(1).max(200).optional(),
+  phone: z.string().min(1).max(30).optional(),
+  email: z.string().email().max(254).optional(),
   dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
-  gender: z.string().optional(),
-  profilePhoto: z.string().optional(),
-  country: z.string().optional(),
-  state: z.string().optional(),
-  city: z.string().optional(),
-  pincode: z.string().optional(),
-  locality: z.string().optional(),
-  occupation: z.string().optional(),
-  maritalStatus: z.string().optional(),
-  emergencyContactName: z.string().optional(),
-  emergencyContactPhone: z.string().optional(),
-  emergencyContactRelationship: z.string().optional(),
-  landmark: z.string().optional(),
+  gender: z.string().max(50).optional(),
+  profilePhoto: z.string().max(2048).optional(),
+  country: z.string().max(100).optional(),
+  state: z.string().max(100).optional(),
+  city: z.string().max(100).optional(),
+  pincode: z.string().max(20).optional(),
+  locality: z.string().max(200).optional(),
+  occupation: z.string().max(100).optional(),
+  maritalStatus: z.string().max(50).optional(),
+  emergencyContactName: z.string().max(200).optional(),
+  emergencyContactPhone: z.string().max(30).optional(),
+  emergencyContactRelationship: z.string().max(100).optional(),
+  landmark: z.string().max(200).optional(),
   languagePreference: z.string().min(2).max(10).optional(),
-  height: z.union([z.string(), z.number()]).transform(v => String(v)).optional(),
-  weight: z.union([z.string(), z.number()]).transform(v => String(v)).optional(),
-  bloodGroup: z.string().optional(),
+  height: z.union([z.string().max(10), z.number()]).transform(v => String(v)).optional(),
+  weight: z.union([z.string().max(10), z.number()]).transform(v => String(v)).optional(),
+  bloodGroup: z.string().max(10).optional(),
   fitnessGoals: z.array(z.enum(VALID_FITNESS_GOALS)).optional(),
-  medicalHistory: z.string().optional(),
-  injuries: z.string().optional(),
-  healthConditions: z.string().optional(),
+  medicalHistory: z.string().max(5000).optional(),
+  injuries: z.string().max(5000).optional(),
+  healthConditions: z.string().max(5000).optional(),
   anniversary: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
 });
 
@@ -190,19 +237,25 @@ export const leads = pgTable("leads", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
-const numericField = z.union([z.string(), z.number()]).transform(v => String(v)).optional();
+const numericField = z.union([z.string().max(20), z.number()]).transform(v => String(v)).optional();
 
 export const insertLeadSchema = createInsertSchema(leads).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
 }).extend({
-  fullName: z.string().min(1, "Full name is required"),
-  phone: z.string().min(1, "Phone is required"),
-  brandName: z.string().min(1, "Brand name is required"),
-  branchName: z.string().min(1, "Branch name is required"),
-  leadStatus: z.string().min(1, "Lead status is required"),
-  storeLeadId: z.string().min(1, "Store lead ID is required"),
+  fullName: z.string().min(1, "Full name is required").max(200),
+  phone: z.string().min(1, "Phone is required").max(30),
+  email: z.string().email().max(254).optional(),
+  brandName: z.string().min(1, "Brand name is required").max(200),
+  branchName: z.string().min(1, "Branch name is required").max(200),
+  leadStatus: z.string().min(1, "Lead status is required").max(100),
+  storeLeadId: z.string().min(1, "Store lead ID is required").max(100),
+  leadSource: z.string().max(100).optional(),
+  interestedService: z.string().max(200).optional(),
+  interestedPackage: z.string().max(200).optional(),
+  visitDate: z.string().max(20).optional(),
+  followUpDate: z.string().max(20).optional(),
   packagePrice: numericField,
   offeredPrice: numericField,
 });
@@ -213,6 +266,17 @@ export const patchLeadSchema = createInsertSchema(leads).omit({
   createdAt: true,
   updatedAt: true,
 }).extend({
+  fullName: z.string().min(1).max(200).optional(),
+  phone: z.string().min(1).max(30).optional(),
+  email: z.string().email().max(254).optional(),
+  brandName: z.string().min(1).max(200).optional(),
+  branchName: z.string().min(1).max(200).optional(),
+  leadStatus: z.string().min(1).max(100).optional(),
+  leadSource: z.string().max(100).optional(),
+  interestedService: z.string().max(200).optional(),
+  interestedPackage: z.string().max(200).optional(),
+  visitDate: z.string().max(20).optional(),
+  followUpDate: z.string().max(20).optional(),
   packagePrice: numericField,
   offeredPrice: numericField,
 }).partial();
@@ -235,6 +299,8 @@ export const webhookEvents = pgTable("webhook_events", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
+
+export type AdminAuditLog = typeof adminAuditLog.$inferSelect;
 
 export type WebhookEvent = typeof webhookEvents.$inferSelect;
 export type WebhookStatus = "pending" | "success" | "failed" | "dead";
