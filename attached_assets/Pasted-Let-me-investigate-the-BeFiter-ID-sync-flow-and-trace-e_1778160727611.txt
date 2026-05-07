@@ -1,0 +1,39 @@
+Let me investigate the BeFiter ID sync flow and trace exactly where it breaks for new members.
+
+
+2 actions
+Found the root cause immediately in the logs. Let me now read the BeFiter ID service to fully understand the mapping gap.
+
+
+3 actions
+Let me check the internal fitness goal constants to see all the values we use.
+
+
+8 actions
+Found the root cause. Here's exactly what's happening:
+
+The error in your production logs:
+
+fitnessGoals: Invalid enum value. Expected 'Weight Loss' | 'Muscle Gain' | 'Flexibility'...
+received 'weight_loss', 'fat_burn'
+
+The problem in plain terms:
+When a new member registers and picks their fitness goals (like "Weight Loss" or "Fat Burn"), your app stores them internally as computer-friendly codes like weight_loss and fat_burn. When it then tries to sync that member to the BeFiter ID service, it sends those raw codes — but BeFiter ID's system rejects anything that isn't the exact human-readable label ('Weight Loss', 'Muscle Gain', etc.). The sync fails with a 400 error, and the identity never gets created. The member exists in your system but is invisible to BeFiter ID.
+
+The mapping gap — your 13 goals vs BeFiter ID's 8:
+
+Your internal key	BeFiter ID value	Status
+weight_loss	Weight Loss	✓ Maps
+muscle_gain	Muscle Gain	✓ Maps
+endurance	Endurance	✓ Maps
+flexibility	Flexibility	✓ Maps
+general_fitness	General Fitness	✓ Maps
+rehabilitation	Rehabilitation	✓ Maps
+stress_relief	Stress Relief	✓ Maps
+sports_performance	Sports Performance	✓ Maps
+weight_gain	(none)	✗ Drop
+strength	(none)	✗ Drop
+body_toning	(none)	✗ Drop
+fat_burn	(none)	✗ Drop
+posture_correction	(none)	✗ Drop
+The fix is a small translation function inside server/befiter-id-service.ts — before sending fitnessGoals to BeFiter ID, map the 8 that have equivalents to their human-readable form, and silently drop the 5 that don't. This is a ~15-line change, and once deployed would also fix existing members via the admin backfill route (POST /api/admin/backfill-befiter-id).
