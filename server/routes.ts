@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes, randomUUID } from "crypto";
-import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor, tolerantParse, scopeFitnessGoalsToApp } from "./storage";
+import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor, quarantineEmailForApp, tolerantParse, scopeFitnessGoalsToApp } from "./storage";
 import type { PatchBefiterId, UpdateBefiterId, InsertBefiterId } from "@shared/schema";
 import { retryWebhookNow, isChannelConfigured } from "./webhook-publisher";
 import { apiKeyAuth } from "./auth";
@@ -287,7 +287,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         } else {
           warnings.push("email_missing");
         }
-        cleaned.email = quarantineEmailFor(String(cleaned.currentPhone));
+        // Use a deterministic quarantine email keyed to (appName, appUserId) so
+        // repeated calls from the same caller always hash to the same placeholder
+        // and hit the existingByEmail match in createOrUpdateIdentity rather than
+        // creating a new row. Phone-based lookup is intentionally avoided: phone
+        // is not unique (recycled SIMs) and would risk linking to the wrong person.
+        cleaned.email = quarantineEmailForApp(req.appName!, appUserId);
       } else {
         cleaned.email = rawEmail;
       }
@@ -455,7 +460,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         } else if (!warnings.includes("email_missing")) {
           warnings.push("email_missing");
         }
-        createEmail = quarantineEmailFor(createPhone);
+        createEmail = quarantineEmailForApp(appName, appUserId);
       }
 
       const { phone: _p, email: _e, ...restProfile } = normalisedProfileData;

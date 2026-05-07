@@ -172,6 +172,19 @@ export function quarantineEmailFor(phone: string): string {
   const suffix = randomUUID().replace(/-/g, "").slice(0, 10);
   return `quarantine.${cleaned}.${suffix}@befiter.invalid`;
 }
+// Deterministic quarantine email keyed to a specific (appName, appUserId)
+// pair. Because appUserId is unique within an app, repeated create/upsert
+// calls from the same caller always produce the same placeholder, which lets
+// createOrUpdateIdentity deduplicate via its existingByEmail lookup without
+// relying on the non-unique phone column.
+import { createHash } from "crypto";
+export function quarantineEmailForApp(appName: string, appUserId: string): string {
+  const hash = createHash("sha256")
+    .update(`${appName}:${appUserId}`)
+    .digest("hex")
+    .slice(0, 16);
+  return `quarantine.app.${hash}@befiter.invalid`;
+}
 
 const KNOWN_IDENTITY_KEYS = new Set([
   "fullName", "currentPhone", "phone", "previousPhones", "email",
