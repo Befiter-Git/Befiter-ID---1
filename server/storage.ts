@@ -125,11 +125,11 @@ export function serializeIdentity(identity: BefiterId | BefiterIdWithLinks): Ser
   return base;
 }
 
-// Returns a copy of the serialized identity where the top-level `fitnessGoals`
-// is scoped to the calling app's metadata bucket (instead of the deduped union
-// across all apps). Used for app-authenticated API responses so one app cannot
-// see peer apps' fitness goals on its own caller. Falls back to the union when
-// the caller has no metadata of its own yet.
+// Returns a copy of the serialized identity scoped to one calling app:
+// - top-level `fitnessGoals` reflects ONLY the caller's own metadata bucket
+//   (null when the caller has no bucket — no cross-app union fallback)
+// - peer app links have their `metadata` blanked so callers can't read other
+//   apps' private buckets.
 export function scopeFitnessGoalsToApp(
   identity: SerializedBefiterIdWithLinks,
   appName: string,
@@ -143,14 +143,13 @@ export function scopeFitnessGoalsToApp(
   const link = identity.appLinks.find((l) => l.appName === appName);
   const md = (link?.metadata ?? {}) as Record<string, unknown>;
   const scoped = md.fitnessGoals;
-  let topLevel: string[] | null = identity.fitnessGoals ?? null;
+  // Deterministic per-app contract: top-level `fitnessGoals` reflects ONLY
+  // the calling app's bucket. If the caller has no bucket yet, return null
+  // rather than leaking the cross-app union via the legacy column.
+  let topLevel: string[] | null = null;
   if (Array.isArray(scoped)) {
     const cleaned = scoped.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
     topLevel = cleaned.length > 0 ? cleaned : null;
-  } else {
-    // Caller has no metadata yet — don't leak the cross-app union; show
-    // the legacy column value (or null).
-    topLevel = identity.fitnessGoals ?? null;
   }
   return { ...identity, appLinks: filteredLinks, fitnessGoals: topLevel };
 }
@@ -197,8 +196,17 @@ export function extractMetadataBucket(body: Record<string, unknown>): {
     if (k === "metadata" && v && typeof v === "object") {
       Object.assign(metadata, v as Record<string, unknown>);
     } else if (k === "fitnessGoals") {
-      if (Array.isArray(v)) metadata.fitnessGoals = v;
-      cleaned[k] = v;
+      // Always preserve fitnessGoals in the per-app metadata bucket, even if
+      // a caller sends a single string ("weight_loss") or other shape — never
+      // lose the raw intake value to a schema reject.
+      if (Array.isArray(v)) {
+        metadata.fitnessGoals = v.filter((x) => x != null).map((x) => String(x));
+      } else if (typeof v === "string" && v.trim()) {
+        metadata.fitnessGoals = [v.trim()];
+      } else if (v != null) {
+        metadata.fitnessGoals = [String(v)];
+      }
+      // Don't pass through to `cleaned` — the array form is now in metadata.
     } else if (!KNOWN_IDENTITY_KEYS.has(k)) {
       metadata[k] = v;
     } else {
