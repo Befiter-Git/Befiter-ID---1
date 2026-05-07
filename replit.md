@@ -157,6 +157,53 @@ Whenever an identity is created, updated, or linked to an app, this service publ
 - **Endpoints**: `GET /admin/leads?q=&status=&page=&limit=`, `GET /admin/lead/:id`, `GET /admin/stats` (now also returns `leads` and `webhooks` blocks).
 - **Follow-ups Due** counts open (non-converted, non-lost) leads whose `follow_up_date` (text `YYYY-MM-DD`) is on or before today; non-ISO and empty values are excluded via regex guard before date cast.
 
+## Tolerant Intake & Per-app Metadata (Step 6)
+
+Goal: stop CRM/Social integrations from failing on field-shape mismatches (open-ended fitness goals, malformed emails) without losing the offending data.
+
+### Field grouping
+
+Identity fields are now treated in three groups when received from connected apps:
+
+- **A. Core (strict)** — `fullName`, `currentPhone`, `email`. Validated, normalised, persisted on the identity row.
+- **B. Shared (lenient, last-writer-wins)** — known top-level columns (city, occupation, height, etc.). Validated leniently and stored on the identity row; last sender wins.
+- **C. Per-app bucket** — `fitnessGoals` and any unknown extra keys. Routed into `app_links.metadata` (jsonb) for the calling app, so each app keeps its own view without colliding with peer apps.
+
+### Lenient email handling
+
+If `email` is missing or malformed at create-time, the service now:
+1. Stores the raw bad value in `befiter_ids.rejected_email_at_intake` (255 char cap),
+2. Synthesises a unique placeholder `quarantine.<phone-digits>.<random-hex>@befiter.invalid` and uses it as the unique key (random suffix prevents two different people sharing a recycled phone from being merged into one identity),
+3. Returns the identity normally with `warnings: ["email_quarantined"]` (or `"email_missing"`),
+4. Surfaces the row in the admin **Intake Issues** queue (`/admin/intake-issues`) for an operator to fix.
+
+`PATCH /api/identity/:id` will silently drop a malformed email rather than overwriting a good one.
+`PUT /api/identity/upsert` follows the same rules — never PATCHes with a bad email; only quarantines on initial create.
+
+### Top-level `fitnessGoals` is now a union
+
+`fitnessGoals` on the serialised identity is computed as the deduped union of every linked app's `metadata.fitnessGoals` (with the legacy `fitness_goals` column used as a fallback only when no metadata is set). The enum constraint has been removed — any string is accepted.
+
+### Schema changes
+
+- `befiter_ids.rejected_email_at_intake text` (nullable)
+- `app_links.metadata jsonb default '{}'::jsonb`
+
+### New admin endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/admin/intake-issues?page=&limit=` | Paginated list of identities with `rejected_email_at_intake IS NOT NULL` |
+| POST | `/admin/intake-issues/:id/fix-email` | Body `{ email }` — replace placeholder, clear rejected value, write `admin_audit_log` rows |
+
+### Integration recipe (for CRM / Social / future apps)
+
+When calling `POST /api/identity/create` or `PUT /api/identity/upsert`:
+- Always send `appUserId`, `fullName`, `currentPhone` (or `phone`).
+- Send `email` if you have one — bad values are tolerated and quarantined.
+- Send anything else inside a `metadata` object, e.g. `{ "metadata": { "fitnessGoals": ["Crossfit"], "leadSource": "instagram" } }`. Top-level `fitnessGoals` arrays are also accepted and routed to the same bucket.
+- Unknown top-level keys are silently routed to your app's metadata bucket — no rejections.
+
 ## Metrics (Step 5)
 
 - **Page**: `/admin/metrics` — trends + conversion + delivery health.

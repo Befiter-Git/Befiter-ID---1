@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, boolean, timestamp, date, numeric, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, boolean, timestamp, date, numeric, integer, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -44,6 +44,7 @@ export const befiterIds = pgTable("befiter_ids", {
   emergencyContactRelationship: text("emergency_contact_relationship"),
   landmark: text("landmark"),
   identityTag: text("identity_tag").default("member"),
+  rejectedEmailAtIntake: text("rejected_email_at_intake"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -53,6 +54,7 @@ export const appLinks = pgTable("app_links", {
   befiterId: varchar("befiter_id", { length: 50 }).notNull().references(() => befiterIds.id),
   appName: text("app_name").notNull(),
   appUserId: text("app_user_id").notNull(),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().default(sql`'{}'::jsonb`),
   linkedAt: timestamp("linked_at").defaultNow(),
 });
 
@@ -90,7 +92,7 @@ export const insertBefiterIdSchema = createInsertSchema(befiterIds).omit({
 }).extend({
   fullName: z.string().min(1, "Full name is required").max(200),
   currentPhone: z.string().min(1, "Phone is required").max(30),
-  email: z.string().email("Valid email is required").max(254),
+  email: z.string().min(1, "Email is required").max(254),
   profilePhoto: z.string().max(2048).optional(),
   country: z.string().max(100).optional(),
   state: z.string().max(100).optional(),
@@ -151,13 +153,14 @@ export const updateBefiterIdSchema = createInsertSchema(befiterIds).omit({
   gender: z.string().max(50).optional(),
   dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
   anniversary: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
-  fitnessGoals: z.array(z.enum(VALID_FITNESS_GOALS)).optional(),
+  fitnessGoals: z.array(z.string().max(100)).optional(),
+  metadata: z.record(z.unknown()).optional(),
 });
 
 export const patchBefiterIdSchema = z.object({
   fullName: z.string().min(1).max(200).optional(),
   phone: z.string().min(1).max(30).optional(),
-  email: z.string().email().max(254).optional(),
+  email: z.string().min(1).max(254).optional(),
   dateOfBirth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
   gender: z.string().max(50).optional(),
   profilePhoto: z.string().max(2048).optional(),
@@ -176,15 +179,17 @@ export const patchBefiterIdSchema = z.object({
   height: z.union([z.string().max(10), z.number()]).transform(v => String(v)).optional(),
   weight: z.union([z.string().max(10), z.number()]).transform(v => String(v)).optional(),
   bloodGroup: z.string().max(10).optional(),
-  fitnessGoals: z.array(z.enum(VALID_FITNESS_GOALS)).optional(),
+  fitnessGoals: z.array(z.string().max(100)).optional(),
   medicalHistory: z.string().max(5000).optional(),
   injuries: z.string().max(5000).optional(),
   healthConditions: z.string().max(5000).optional(),
   anniversary: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format").optional(),
+  metadata: z.record(z.unknown()).optional(),
 });
 
 export const upsertBefiterIdSchema = patchBefiterIdSchema.extend({
   appUserId: z.string().min(1),
+  email: z.string().min(1).max(254).optional(),
 });
 export type UpsertBefiterId = z.infer<typeof upsertBefiterIdSchema>;
 

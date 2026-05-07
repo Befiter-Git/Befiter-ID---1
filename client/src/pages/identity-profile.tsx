@@ -409,17 +409,36 @@ export default function IdentityProfile() {
                 <p className="text-sm text-muted-foreground">No apps linked yet.</p>
               ) : (
                 <div className="space-y-2">
-                  {identity.appLinks.map((link) => (
-                    <div key={link.id} className="flex items-center justify-between py-2 border-b border-border last:border-0" data-testid={`app-link-${link.id}`}>
-                      <div>
-                        <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-medium">{link.appName}</span>
-                        <p className="text-xs text-muted-foreground mt-1 font-mono">User ID: {link.appUserId}</p>
+                  {identity.appLinks.map((link) => {
+                    const md = (link.metadata ?? {}) as Record<string, unknown>;
+                    const mdEntries = Object.entries(md);
+                    return (
+                      <div key={link.id} className="py-2 border-b border-border last:border-0" data-testid={`app-link-${link.id}`}>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-medium">{link.appName}</span>
+                            <p className="text-xs text-muted-foreground mt-1 font-mono">User ID: {link.appUserId}</p>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {link.linkedAt ? format(new Date(link.linkedAt), "MMM d, yyyy") : "—"}
+                          </p>
+                        </div>
+                        {mdEntries.length > 0 && (
+                          <div className="mt-2 ml-1 space-y-1" data-testid={`app-link-metadata-${link.id}`}>
+                            <Label className="text-xs text-muted-foreground">App-specific data</Label>
+                            <div className="text-xs font-mono bg-muted/50 rounded p-2 space-y-0.5">
+                              {mdEntries.map(([k, v]) => (
+                                <div key={k} className="flex gap-2">
+                                  <span className="text-muted-foreground">{k}:</span>
+                                  <span className="break-all">{typeof v === "string" ? v : JSON.stringify(v)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      <p className="text-xs text-muted-foreground">
-                        {link.linkedAt ? format(new Date(link.linkedAt), "MMM d, yyyy") : "—"}
-                      </p>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </Card>

@@ -11,6 +11,7 @@ import Leads from "@/pages/leads";
 import LeadDetail from "@/pages/lead-detail";
 import Metrics from "@/pages/metrics";
 import ApiKeys from "@/pages/api-keys";
+import IntakeIssues from "@/pages/intake-issues";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -24,6 +25,7 @@ function Router() {
       <Route path="/admin/leads" component={Leads} />
       <Route path="/admin/lead/:id" component={LeadDetail} />
       <Route path="/admin/metrics" component={Metrics} />
+      <Route path="/admin/intake-issues" component={IntakeIssues} />
       <Route path="/admin/api-keys" component={ApiKeys} />
       <Route component={NotFound} />
     </Switch>

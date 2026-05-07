@@ -96,22 +96,101 @@ export type SerializedBefiterId = Omit<BefiterId, "height" | "weight"> & {
 };
 export type SerializedBefiterIdWithLinks = SerializedBefiterId & { appLinks: AppLink[] };
 
+function unionFitnessGoalsFromLinks(links: AppLink[], fallback: string[] | null | undefined): string[] | null {
+  const set = new Set<string>();
+  for (const l of links) {
+    const md = (l.metadata ?? {}) as Record<string, unknown>;
+    const g = md.fitnessGoals;
+    if (Array.isArray(g)) g.forEach((x) => typeof x === "string" && x.trim() && set.add(x.trim()));
+  }
+  if (set.size === 0) {
+    return Array.isArray(fallback) && fallback.length > 0 ? fallback : null;
+  }
+  return Array.from(set);
+}
+
 export function serializeIdentity(identity: BefiterId): SerializedBefiterId;
 export function serializeIdentity(identity: BefiterIdWithLinks): SerializedBefiterIdWithLinks;
 export function serializeIdentity(identity: BefiterId | BefiterIdWithLinks): SerializedBefiterId | SerializedBefiterIdWithLinks {
-  return {
+  const links = (identity as BefiterIdWithLinks).appLinks;
+  const base = {
     ...identity,
     height: identity.height != null ? Number(identity.height) : null,
     weight: identity.weight != null ? Number(identity.weight) : null,
-  };
+  } as SerializedBefiterId & { appLinks?: AppLink[] };
+  if (Array.isArray(links)) {
+    base.fitnessGoals = unionFitnessGoalsFromLinks(links, identity.fitnessGoals);
+    return base as SerializedBefiterIdWithLinks;
+  }
+  return base as SerializedBefiterId;
+}
+
+// Synthesizes a deterministic placeholder email for identities whose intake
+// email failed validation but who still have a usable phone. The raw bad value
+// is stored separately in `rejectedEmailAtIntake` for admin remediation.
+export function isValidEmail(s: unknown): boolean {
+  if (typeof s !== "string") return false;
+  const t = s.trim();
+  return t.length > 2 && t.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t);
+}
+// Phone is NOT unique (recycled SIMs), so the placeholder must be unique per
+// identity to avoid silently merging two different people behind one row.
+// We append a short random suffix; the original raw email (if any) is preserved
+// in `rejected_email_at_intake` for admin reconciliation.
+export function quarantineEmailFor(phone: string): string {
+  const cleaned = phone.replace(/[^a-zA-Z0-9]/g, "");
+  const suffix = randomUUID().replace(/-/g, "").slice(0, 10);
+  return `quarantine.${cleaned}.${suffix}@befiter.invalid`;
+}
+
+const KNOWN_IDENTITY_KEYS = new Set([
+  "fullName", "currentPhone", "phone", "previousPhones", "email",
+  "dateOfBirth", "gender", "profilePhoto", "country", "state", "city",
+  "pincode", "locality", "occupation", "maritalStatus",
+  "emergencyContactName", "emergencyContactPhone", "emergencyContactRelationship",
+  "landmark", "languagePreference", "height", "weight", "bloodGroup",
+  "medicalHistory", "injuries", "healthConditions", "anniversary",
+  "identityTag", "id", "createdAt", "updatedAt", "rejectedEmailAtIntake",
+  "appUserId", "metadata", "fitnessGoals",
+]);
+
+// Pulls fitnessGoals + any unknown keys out of the input body and returns the
+// per-app metadata bucket plus the cleaned body. Caller-supplied `metadata`
+// object is merged on top.
+export function extractMetadataBucket(body: Record<string, unknown>): {
+  cleaned: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+} {
+  const metadata: Record<string, unknown> = {};
+  const cleaned: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (k === "metadata" && v && typeof v === "object") {
+      Object.assign(metadata, v as Record<string, unknown>);
+    } else if (k === "fitnessGoals") {
+      if (Array.isArray(v)) metadata.fitnessGoals = v;
+      cleaned[k] = v;
+    } else if (!KNOWN_IDENTITY_KEYS.has(k)) {
+      metadata[k] = v;
+    } else {
+      cleaned[k] = v;
+    }
+  }
+  return { cleaned, metadata };
+}
+
+export interface CreateOrUpdateOptions {
+  metadata?: Record<string, unknown>;
+  rejectedEmailAtIntake?: string | null;
 }
 
 export interface IStorage {
   lookupByCurrentPhone(phone: string): Promise<BefiterId | undefined>;
   lookupByEmail(email: string): Promise<BefiterId | undefined>;
-  createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<CreateOrUpdateResult>;
+  createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string, opts?: CreateOrUpdateOptions): Promise<CreateOrUpdateResult>;
   updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks>;
-  patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks>;
+  patchIdentity(befiterId: string, data: PatchBefiterId, appName: string, opts?: { metadata?: Record<string, unknown> }): Promise<SerializedBefiterIdWithLinks>;
+  searchIntakeIssues(page: number, limit: number): Promise<{ results: SerializedBefiterIdWithLinks[]; total: number }>;
+  clearRejectedEmail(befiterId: string, newEmail: string, adminUsername: string): Promise<SerializedBefiterIdWithLinks>;
   adminUpdateIdentity(befiterId: string, data: Partial<BefiterId>, adminUsername: string): Promise<SerializedBefiterIdWithLinks>;
   getIdentity(befiterId: string): Promise<SerializedBefiterIdWithLinks | undefined>;
   linkApp(befiterId: string, appName: string, appUserId: string): Promise<AppLink>;
@@ -174,7 +253,58 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string): Promise<CreateOrUpdateResult> {
+  private async upsertAppLinkMetadataTx(
+    tx: Tx, befiterId: string, appName: string, metadata: Record<string, unknown>,
+  ): Promise<void> {
+    if (!metadata || Object.keys(metadata).length === 0) return;
+    const [existing] = await tx.select().from(appLinks)
+      .where(and(eq(appLinks.befiterId, befiterId), eq(appLinks.appName, appName)))
+      .limit(1);
+    if (!existing) return;
+    const merged = { ...((existing.metadata ?? {}) as Record<string, unknown>), ...metadata };
+    await tx.update(appLinks).set({ metadata: merged }).where(eq(appLinks.id, existing.id));
+  }
+
+  async searchIntakeIssues(page: number, limit: number): Promise<{ results: SerializedBefiterIdWithLinks[]; total: number }> {
+    const offset = (page - 1) * limit;
+    const where = sql`${befiterIds.rejectedEmailAtIntake} IS NOT NULL`;
+    const [totalRow] = await db.select({ count: sql<number>`count(*)::int` }).from(befiterIds).where(where);
+    const rows = await db.select().from(befiterIds).where(where)
+      .limit(limit).offset(offset).orderBy(sql`${befiterIds.createdAt} DESC`);
+    const results = await Promise.all(rows.map(async (row) => {
+      const links = await db.select().from(appLinks).where(eq(appLinks.befiterId, row.id));
+      return serializeIdentity({ ...row, appLinks: links });
+    }));
+    return { results, total: totalRow.count };
+  }
+
+  async clearRejectedEmail(befiterId: string, newEmail: string, adminUsername: string): Promise<SerializedBefiterIdWithLinks> {
+    return await db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
+      if (!existing) throw new IdentityNotFoundError();
+      const e = newEmail.trim().toLowerCase();
+      if (!isValidEmail(e)) throw new Error("New email must be valid");
+      const [taken] = await tx.select().from(befiterIds).where(eq(befiterIds.email, e)).limit(1);
+      if (taken && taken.id !== befiterId) throw new EmailTakenError();
+      await tx.update(befiterIds).set({
+        email: e, rejectedEmailAtIntake: null, updatedAt: new Date(),
+      }).where(eq(befiterIds.id, befiterId));
+      await tx.insert(adminAuditLog).values([{
+        action: "identity.fix_email", befiterId, adminUsername,
+        fieldChanged: "email", oldValue: existing.email, newValue: e,
+      }, {
+        action: "identity.fix_email", befiterId, adminUsername,
+        fieldChanged: "rejectedEmailAtIntake", oldValue: existing.rejectedEmailAtIntake, newValue: null,
+      }]);
+      const [identityRow] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
+      const links = await tx.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
+      return serializeIdentity({ ...identityRow, appLinks: links });
+    });
+  }
+
+  async createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string, opts?: CreateOrUpdateOptions): Promise<CreateOrUpdateResult> {
+    const metadata = opts?.metadata ?? {};
+    const rejectedEmail = opts?.rejectedEmailAtIntake ?? null;
     return await db.transaction(async (tx) => {
       const [existingByEmail] = await tx.select().from(befiterIds)
         .where(eq(befiterIds.email, data.email.toLowerCase())).limit(1);
@@ -208,7 +338,9 @@ export class DatabaseStorage implements IStorage {
           .limit(1);
         const linkInserted = existingLink.length === 0;
         if (linkInserted) {
-          await tx.insert(appLinks).values({ befiterId: existingByEmail.id, appName, appUserId });
+          await tx.insert(appLinks).values({ befiterId: existingByEmail.id, appName, appUserId, metadata });
+        } else if (Object.keys(metadata).length > 0) {
+          await this.upsertAppLinkMetadataTx(tx, existingByEmail.id, appName, metadata);
         }
 
         const [identityRow] = await tx.select().from(befiterIds).where(eq(befiterIds.id, existingByEmail.id)).limit(1);
@@ -235,9 +367,10 @@ export class DatabaseStorage implements IStorage {
         email: data.email.toLowerCase(),
         previousPhones: [],
         identityTag: "member",
+        rejectedEmailAtIntake: rejectedEmail,
       }).returning();
 
-      await tx.insert(appLinks).values({ befiterId: newIdentity.id, appName, appUserId });
+      await tx.insert(appLinks).values({ befiterId: newIdentity.id, appName, appUserId, metadata });
       const links = await tx.select().from(appLinks).where(eq(appLinks.befiterId, newIdentity.id));
       const identity = serializeIdentity({ ...newIdentity, appLinks: links });
       await insertWebhookEventsTx(tx, "identity.created", { source_app: appName, identity });
@@ -284,7 +417,8 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
-  async patchIdentity(befiterId: string, data: PatchBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks> {
+  async patchIdentity(befiterId: string, data: PatchBefiterId, appName: string, opts?: { metadata?: Record<string, unknown> }): Promise<SerializedBefiterIdWithLinks> {
+   const metadata = opts?.metadata ?? {};
    return await db.transaction(async (tx) => {
     const [existing] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
     if (!existing) throw new IdentityNotFoundError();
@@ -331,10 +465,17 @@ export class DatabaseStorage implements IStorage {
 
     if (auditEntries.length > 0) await tx.insert(identityUpdates).values(auditEntries);
 
-    dbUpdate.updatedAt = new Date();
-    await tx.update(befiterIds)
-      .set(dbUpdate)
-      .where(eq(befiterIds.id, befiterId));
+    if (Object.keys(dbUpdate).length > 0) {
+      dbUpdate.updatedAt = new Date();
+      await tx.update(befiterIds)
+        .set(dbUpdate)
+        .where(eq(befiterIds.id, befiterId));
+    }
+
+    if (Object.keys(metadata).length > 0) {
+      await this.upsertAppLinkMetadataTx(tx, befiterId, appName, metadata);
+      auditEntries.push({ befiterId, appName, fieldChanged: "metadata", oldValue: null, newValue: JSON.stringify(metadata) });
+    }
 
     const [identityRow] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
     const links = await tx.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));

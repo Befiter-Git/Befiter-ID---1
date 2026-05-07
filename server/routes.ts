@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
-import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError } from "./storage";
+import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor } from "./storage";
 import { retryWebhookNow, isChannelConfigured } from "./webhook-publisher";
 import { apiKeyAuth } from "./auth";
 import { requireAdminSession, sessionMiddleware } from "./admin-auth";
@@ -229,37 +229,60 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Phone uniqueness is NOT enforced — phone numbers can be recycled by operators
   app.post("/api/identity/create", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
-      const body = { ...req.body };
-      // Accept both `phone` and `currentPhone` in request body for ease of integration
-      if (body.phone && !body.currentPhone) {
-        body.currentPhone = body.phone;
+      const warnings: string[] = [];
+      const incoming = { ...req.body };
+      if (incoming.phone && !incoming.currentPhone) {
+        incoming.currentPhone = incoming.phone;
       }
-      delete body.phone;
+      delete incoming.phone;
 
-      const parseResult = insertBefiterIdSchema.safeParse(body);
+      const { appUserId } = incoming;
+      if (!appUserId) {
+        return res.status(400).json({ error: "appUserId is required" });
+      }
+      delete incoming.appUserId;
+
+      // Route fitnessGoals + unknown keys + provided metadata into per-app bucket
+      const { cleaned, metadata } = extractMetadataBucket(incoming);
+
+      // Lenient email: if missing or malformed but phone is valid, quarantine raw value
+      let rejectedEmail: string | null = null;
+      const rawEmail = typeof cleaned.email === "string" ? (cleaned.email as string).trim() : "";
+      let normalisedPhone: string;
+      try {
+        normalisedPhone = normalisePhone(String(cleaned.currentPhone ?? ""));
+      } catch (phoneErr: any) {
+        return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
+      }
+      cleaned.currentPhone = normalisedPhone;
+
+      if (!isValidEmail(rawEmail)) {
+        if (rawEmail) {
+          rejectedEmail = rawEmail.slice(0, 254);
+          warnings.push("email_quarantined");
+        } else {
+          warnings.push("email_missing");
+        }
+        cleaned.email = quarantineEmailFor(normalisedPhone);
+      } else {
+        cleaned.email = rawEmail;
+      }
+
+      const parseResult = insertBefiterIdSchema.safeParse(cleaned);
       if (!parseResult.success) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
 
-      const data = parseResult.data;
-      try {
-        data.currentPhone = normalisePhone(data.currentPhone);
-      } catch (phoneErr: any) {
-        return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
-      }
+      const result = await storage.createOrUpdateIdentity(
+        parseResult.data, req.appName!, appUserId,
+        { metadata, rejectedEmailAtIntake: rejectedEmail },
+      );
 
-      const { appUserId } = req.body;
-      if (!appUserId) {
-        return res.status(400).json({ error: "appUserId is required" });
-      }
-
-      const result = await storage.createOrUpdateIdentity(data, req.appName!, appUserId);
-
-      if (result.created) {
-        return res.status(201).json({ identity: result.identity });
-      } else {
-        return res.status(200).json({ identity: result.identity });
-      }
+      const status = result.created ? 201 : 200;
+      return res.status(status).json({
+        identity: result.identity,
+        warnings: warnings.length > 0 ? warnings : undefined,
+      });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to create identity" });
@@ -268,74 +291,119 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.put("/api/identity/upsert", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
-      const parseResult = upsertBefiterIdSchema.safeParse(req.body);
-      if (!parseResult.success) {
-        return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
+      const warnings: string[] = [];
+      const incoming = { ...req.body };
+      const appUserId: string | undefined = incoming.appUserId;
+      if (!appUserId || typeof appUserId !== "string") {
+        return res.status(400).json({ error: "appUserId is required" });
       }
+      delete incoming.appUserId;
 
-      const { appUserId, ...profileData } = parseResult.data;
+      const { cleaned, metadata } = extractMetadataBucket(incoming);
       const appName = req.appName!;
-      let normalisedProfileData = profileData;
-      if (profileData.phone) {
+
+      // Normalise phone if present
+      if (cleaned.phone) {
         try {
-          normalisedProfileData = { ...profileData, phone: normalisePhone(profileData.phone) };
+          cleaned.phone = normalisePhone(String(cleaned.phone));
         } catch (phoneErr: any) {
           return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
         }
       }
 
-      const byAppUserId = await storage.lookupByAppUserId(appName, appUserId);
-      if (byAppUserId) {
-        if (Object.keys(normalisedProfileData).length > 0) {
-          await storage.patchIdentity(byAppUserId.id, normalisedProfileData, appName);
-        }
-        const identity = await storage.getIdentity(byAppUserId.id);
-        return res.json({ identity, matched_by: "appUserId" });
+      // Sanitise email; if invalid and we have a phone, we'll quarantine on create
+      const rawEmail = typeof cleaned.email === "string" ? (cleaned.email as string).trim() : "";
+      const emailIsValid = isValidEmail(rawEmail);
+      const profileForPatch: Record<string, unknown> = { ...cleaned };
+      if (rawEmail && !emailIsValid) {
+        // never PATCH email with a bad value
+        delete profileForPatch.email;
+        warnings.push("email_quarantined");
+      } else if (emailIsValid) {
+        profileForPatch.email = rawEmail;
+      } else {
+        delete profileForPatch.email;
       }
 
-      if (normalisedProfileData.email) {
-        const byEmail = await storage.lookupByEmail(normalisedProfileData.email);
+      const parseProfile = upsertBefiterIdSchema.omit({ appUserId: true }).safeParse(profileForPatch);
+      if (!parseProfile.success) {
+        return res.status(400).json({ error: "Validation failed", details: parseProfile.error.flatten() });
+      }
+      const normalisedProfileData = parseProfile.data as Record<string, unknown>;
+
+      const byAppUserId = await storage.lookupByAppUserId(appName, appUserId);
+      if (byAppUserId) {
+        if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
+          await storage.patchIdentity(byAppUserId.id, normalisedProfileData as any, appName, { metadata });
+        }
+        const identity = await storage.getIdentity(byAppUserId.id);
+        return res.json({ identity, matched_by: "appUserId", warnings: warnings.length > 0 ? warnings : undefined });
+      }
+
+      if (typeof normalisedProfileData.email === "string") {
+        const byEmail = await storage.lookupByEmail(normalisedProfileData.email as string);
         if (byEmail) {
           const alreadyLinked = await storage.isAppLinked(byEmail.id, appName);
           if (!alreadyLinked) {
             return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link" });
           }
-          if (Object.keys(normalisedProfileData).length > 0) {
-            await storage.patchIdentity(byEmail.id, normalisedProfileData, appName);
+          if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
+            await storage.patchIdentity(byEmail.id, normalisedProfileData as any, appName, { metadata });
           }
           const identity = await storage.getIdentity(byEmail.id);
-          return res.json({ identity, matched_by: "email" });
+          return res.json({ identity, matched_by: "email", warnings: warnings.length > 0 ? warnings : undefined });
         }
       }
 
-      if (normalisedProfileData.phone) {
-        const byPhone = await storage.lookupByCurrentPhone(normalisedProfileData.phone);
+      if (typeof normalisedProfileData.phone === "string") {
+        const byPhone = await storage.lookupByCurrentPhone(normalisedProfileData.phone as string);
         if (byPhone) {
           const alreadyLinked = await storage.isAppLinked(byPhone.id, appName);
           if (!alreadyLinked) {
             return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link" });
           }
-          if (Object.keys(normalisedProfileData).length > 0) {
-            await storage.patchIdentity(byPhone.id, normalisedProfileData, appName);
+          if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
+            await storage.patchIdentity(byPhone.id, normalisedProfileData as any, appName, { metadata });
           }
           const identity = await storage.getIdentity(byPhone.id);
-          return res.json({ identity, matched_by: "phone" });
+          return res.json({ identity, matched_by: "phone", warnings: warnings.length > 0 ? warnings : undefined });
         }
       }
 
-      const { fullName, phone: rawPhone, email, ...restProfile } = normalisedProfileData;
-      if (!fullName || !rawPhone || !email) {
-        return res.status(422).json({ error: "fullName, phone, and email are required to create a new identity" });
+      const fullName = normalisedProfileData.fullName as string | undefined;
+      const rawPhone = normalisedProfileData.phone as string | undefined;
+      if (!fullName || !rawPhone) {
+        return res.status(422).json({ error: "fullName and phone are required to create a new identity" });
+      }
+      const normalisedPhoneForCreate = normalisePhone(rawPhone);
+
+      let createEmail: string;
+      let rejectedEmail: string | null = null;
+      if (emailIsValid) {
+        createEmail = rawEmail.toLowerCase();
+      } else {
+        if (rawEmail) {
+          rejectedEmail = rawEmail.slice(0, 254);
+        } else {
+          warnings.push("email_missing");
+        }
+        createEmail = quarantineEmailFor(normalisedPhoneForCreate);
       }
 
+      const { phone: _p, email: _e, ...restProfile } = normalisedProfileData;
       const result = await storage.createOrUpdateIdentity(
-        { ...restProfile, fullName, email, currentPhone: normalisePhone(rawPhone) } as Parameters<typeof storage.createOrUpdateIdentity>[0],
+        { ...restProfile, fullName, email: createEmail, currentPhone: normalisedPhoneForCreate } as Parameters<typeof storage.createOrUpdateIdentity>[0],
         appName,
         appUserId,
+        { metadata, rejectedEmailAtIntake: rejectedEmail },
       );
       const statusCode = result.created ? 201 : 200;
       const matchedBy = result.created ? "created" : "email";
-      return res.status(statusCode).json({ identity: result.identity, matched_by: matchedBy });
+      return res.status(statusCode).json({
+        identity: result.identity,
+        matched_by: matchedBy,
+        warnings: warnings.length > 0 ? warnings : undefined,
+      });
     } catch (err) {
       if (err instanceof EmailTakenError || (err as { code?: string })?.code === "EMAIL_TAKEN") {
         return res.status(409).json({ error: "Email already in use" });
@@ -376,7 +444,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.patch("/api/identity/:id", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
-      const parseResult = patchBefiterIdSchema.safeParse(req.body);
+      const { cleaned, metadata } = extractMetadataBucket({ ...req.body });
+      // Drop email if malformed - never let bad values overwrite a good email
+      if (typeof cleaned.email === "string" && !isValidEmail((cleaned.email as string).trim())) {
+        delete cleaned.email;
+      }
+      const parseResult = patchBefiterIdSchema.safeParse(cleaned);
       if (!parseResult.success) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
@@ -392,7 +465,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
       }
 
-      const updated = await storage.patchIdentity(req.params.id, data, req.appName!);
+      const updated = await storage.patchIdentity(req.params.id, data, req.appName!, { metadata });
       return res.json({ identity: updated });
     } catch (err) {
       if (err instanceof IdentityNotFoundError || (err as { code?: string })?.code === "IDENTITY_NOT_FOUND") {
@@ -570,6 +643,34 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const metrics = await storage.getMetrics();
       return res.json(metrics);
     } catch (err) { next(err); }
+  });
+
+  app.get("/admin/intake-issues", requireAdminSession, async (req: Request, res: Response, next) => {
+    if ((req.headers["accept"] || "").startsWith("text/html")) return next();
+    try {
+      const rawPage = parseInt((req.query.page as string) || "1", 10);
+      const rawLimit = parseInt((req.query.limit as string) || "50", 10);
+      const page = Math.max(1, isNaN(rawPage) ? 1 : rawPage);
+      const limit = Math.min(200, Math.max(1, isNaN(rawLimit) ? 50 : rawLimit));
+      const result = await storage.searchIntakeIssues(page, limit);
+      return res.json(result);
+    } catch (err) { next(err); }
+  });
+
+  app.post("/admin/intake-issues/:id/fix-email", requireAdminSession, async (req: Request, res: Response) => {
+    try {
+      const { email } = req.body ?? {};
+      if (!email || typeof email !== "string") return res.status(400).json({ error: "email is required" });
+      const adminUsername = req.session.adminUsername || "admin";
+      const identity = await storage.clearRejectedEmail(req.params.id as string, email, adminUsername);
+      return res.json({ identity });
+    } catch (err) {
+      if (err instanceof IdentityNotFoundError) return res.status(404).json({ error: "Identity not found" });
+      if (err instanceof EmailTakenError) return res.status(409).json({ error: "Email already in use" });
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(err);
+      return res.status(400).json({ error: msg });
+    }
   });
 
   app.get("/admin/lead/:id", requireAdminSession, async (req: Request, res: Response, next) => {
