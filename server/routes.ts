@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes, randomUUID } from "crypto";
-import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor, tolerantParse } from "./storage";
+import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor, tolerantParse, scopeFitnessGoalsToApp } from "./storage";
 import type { PatchBefiterId, UpdateBefiterId, InsertBefiterId } from "@shared/schema";
 import { retryWebhookNow, isChannelConfigured } from "./webhook-publisher";
 import { apiKeyAuth } from "./auth";
@@ -213,7 +213,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
         await storage.incrementDuplicatePrevention();
         const fullIdentity = await storage.getIdentity(identity.id);
-        return res.json({ found: true, matched_by: matchedBy, identity: fullIdentity });
+        return res.json({ found: true, matched_by: matchedBy, identity: fullIdentity ? scopeFitnessGoalsToApp(fullIdentity, req.appName!) : fullIdentity });
       }
 
       return res.json({ found: false });
@@ -311,7 +311,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       const status = result.created ? 201 : 200;
       return res.status(status).json({
-        identity: result.identity,
+        identity: scopeFitnessGoalsToApp(result.identity, req.appName!),
         warnings: warnings.length > 0 ? warnings : undefined,
       });
     } catch (err) {
@@ -382,7 +382,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           await storage.patchIdentity(byAppUserId.id, normalisedProfileData, appName, { metadata });
         }
         const identity = await storage.getIdentity(byAppUserId.id);
-        return res.json({ identity: identity, matched_by: "appUserId", warnings: warnings.length > 0 ? warnings : undefined });
+        return res.json({ identity: identity ? scopeFitnessGoalsToApp(identity, appName) : identity, matched_by: "appUserId", warnings: warnings.length > 0 ? warnings : undefined });
       }
 
       if (typeof normalisedProfileData.email === "string") {
@@ -396,7 +396,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             await storage.patchIdentity(byEmail.id, normalisedProfileData, appName, { metadata });
           }
           const identity = await storage.getIdentity(byEmail.id);
-          return res.json({ identity: identity, matched_by: "email", warnings: warnings.length > 0 ? warnings : undefined });
+          return res.json({ identity: identity ? scopeFitnessGoalsToApp(identity, appName) : identity, matched_by: "email", warnings: warnings.length > 0 ? warnings : undefined });
         }
       }
 
@@ -411,7 +411,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             await storage.patchIdentity(byPhone.id, normalisedProfileData, appName, { metadata });
           }
           const identity = await storage.getIdentity(byPhone.id);
-          return res.json({ identity: identity, matched_by: "phone", warnings: warnings.length > 0 ? warnings : undefined });
+          return res.json({ identity: identity ? scopeFitnessGoalsToApp(identity, appName) : identity, matched_by: "phone", warnings: warnings.length > 0 ? warnings : undefined });
         }
       }
 
@@ -435,10 +435,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           code: "VALIDATION_FAILED",
         });
       }
-      let phoneIsPlaceholder = false;
       if (!createPhone) {
         createPhone = `unknown-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
-        phoneIsPlaceholder = true;
         if (rawPhoneForCreate) {
           metadata.rejectedPhoneAtIntake = rawPhoneForCreate;
           if (!warnings.includes("phone_quarantined")) warnings.push("phone_quarantined");
@@ -476,7 +474,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const statusCode = result.created ? 201 : 200;
       const matchedBy = result.created ? "created" : "email";
       return res.status(statusCode).json({
-        identity: result.identity,
+        identity: scopeFitnessGoalsToApp(result.identity, appName),
         matched_by: matchedBy,
         warnings: warnings.length > 0 ? warnings : undefined,
       });
@@ -529,7 +527,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // patchIdentity with empty data still merges metadata into the per-app bucket
         updated = await storage.patchIdentity(req.params.befiterId, {} as PatchBefiterId, req.appName!, { metadata });
       }
-      return res.json({ identity: updated ? updated : updated, warnings: warnings.length > 0 ? warnings : undefined });
+      return res.json({ identity: updated ? scopeFitnessGoalsToApp(updated, req.appName!) : updated, warnings: warnings.length > 0 ? warnings : undefined });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to update identity" });
@@ -563,7 +561,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       const updated = await storage.patchIdentity(req.params.id, data, req.appName!, { metadata });
-      return res.json({ identity: updated, warnings: warnings.length > 0 ? warnings : undefined });
+      return res.json({ identity: scopeFitnessGoalsToApp(updated, req.appName!), warnings: warnings.length > 0 ? warnings : undefined });
     } catch (err) {
       if (err instanceof IdentityNotFoundError || (err as { code?: string })?.code === "IDENTITY_NOT_FOUND") {
         return res.status(404).json({ error: "Identity not found" });
@@ -608,7 +606,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       await storage.linkApp(req.params.befiterId, req.appName!, appUserId);
       const identity = await storage.getIdentity(req.params.befiterId);
-      return res.status(201).json({ identity: identity });
+      return res.status(201).json({ identity: identity ? scopeFitnessGoalsToApp(identity, req.appName!) : identity });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to link app" });
@@ -621,7 +619,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!identity) return res.status(404).json({ error: "Identity not found" });
       const linked = identity.appLinks.some(l => l.appName === req.appName);
       if (!linked) return res.status(404).json({ error: "Identity not found" });
-      return res.json({ identity: identity });
+      return res.json({ identity: scopeFitnessGoalsToApp(identity, req.appName!) });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to fetch identity" });

@@ -143,10 +143,11 @@ export function scopeFitnessGoalsToApp(
   const link = identity.appLinks.find((l) => l.appName === appName);
   const md = (link?.metadata ?? {}) as Record<string, unknown>;
   const scoped = md.fitnessGoals;
-  // Deterministic per-app contract: top-level `fitnessGoals` reflects ONLY
-  // the calling app's bucket. If the caller has no bucket yet, return null
-  // rather than leaking the cross-app union via the legacy column.
-  let topLevel: string[] | null = null;
+  // Per-app contract: top-level `fitnessGoals` reflects the calling app's
+  // own bucket when one exists. When the caller has no bucket yet, fall back
+  // to the cross-app union (legacy compatibility) so existing callers are
+  // unaffected during the migration window.
+  let topLevel: string[] | null = identity.fitnessGoals ?? null;
   if (Array.isArray(scoped)) {
     const cleaned = scoped.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
     topLevel = cleaned.length > 0 ? cleaned : null;
