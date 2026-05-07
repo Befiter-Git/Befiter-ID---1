@@ -122,7 +122,37 @@ export function serializeIdentity(identity: BefiterId | BefiterIdWithLinks): Ser
     base.fitnessGoals = unionFitnessGoalsFromLinks(links, identity.fitnessGoals);
     return base as SerializedBefiterIdWithLinks;
   }
-  return base as SerializedBefiterId;
+  return base;
+}
+
+// Returns a copy of the serialized identity where the top-level `fitnessGoals`
+// is scoped to the calling app's metadata bucket (instead of the deduped union
+// across all apps). Used for app-authenticated API responses so one app cannot
+// see peer apps' fitness goals on its own caller. Falls back to the union when
+// the caller has no metadata of its own yet.
+export function scopeFitnessGoalsToApp(
+  identity: SerializedBefiterIdWithLinks,
+  appName: string,
+): SerializedBefiterIdWithLinks {
+  // Strip peer apps' metadata so an app-scoped caller never sees another
+  // app's bucket. Other apps' link rows are still listed (so the caller
+  // knows the identity is multi-app) but their `metadata` is blanked out.
+  const filteredLinks = identity.appLinks.map((l) =>
+    l.appName === appName ? l : { ...l, metadata: {} as Record<string, unknown> },
+  );
+  const link = identity.appLinks.find((l) => l.appName === appName);
+  const md = (link?.metadata ?? {}) as Record<string, unknown>;
+  const scoped = md.fitnessGoals;
+  let topLevel: string[] | null = identity.fitnessGoals ?? null;
+  if (Array.isArray(scoped)) {
+    const cleaned = scoped.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+    topLevel = cleaned.length > 0 ? cleaned : null;
+  } else {
+    // Caller has no metadata yet — don't leak the cross-app union; show
+    // the legacy column value (or null).
+    topLevel = identity.fitnessGoals ?? null;
+  }
+  return { ...identity, appLinks: filteredLinks, fitnessGoals: topLevel };
 }
 
 // Synthesizes a deterministic placeholder email for identities whose intake
@@ -283,6 +313,17 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  private async mirrorFitnessGoalsToLegacyTx(tx: Tx, befiterId: string): Promise<void> {
+    const allLinks = await tx.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
+    const set = new Set<string>();
+    for (const l of allLinks) {
+      const md = (l.metadata ?? {}) as Record<string, unknown>;
+      const g = md.fitnessGoals;
+      if (Array.isArray(g)) g.forEach((x) => typeof x === "string" && x.trim() && set.add(x.trim()));
+    }
+    await tx.update(befiterIds).set({ fitnessGoals: Array.from(set) }).where(eq(befiterIds.id, befiterId));
+  }
+
   private async upsertAppLinkMetadataTx(
     tx: Tx, befiterId: string, appName: string, metadata: Record<string, unknown>,
   ): Promise<void> {
@@ -293,6 +334,12 @@ export class DatabaseStorage implements IStorage {
     if (!existing) return;
     const merged = { ...((existing.metadata ?? {}) as Record<string, unknown>), ...metadata };
     await tx.update(appLinks).set({ metadata: merged }).where(eq(appLinks.id, existing.id));
+    // Mirror fitnessGoals union to the legacy `befiter_ids.fitness_goals`
+    // column so any reader still using it during the transition window sees
+    // a sensible value. Recomputed across all apps to remain consistent.
+    if ("fitnessGoals" in metadata) {
+      await this.mirrorFitnessGoalsToLegacyTx(tx, befiterId);
+    }
   }
 
   async searchIntakeIssues(page: number, limit: number): Promise<{ results: SerializedBefiterIdWithLinks[]; total: number }> {
@@ -326,9 +373,23 @@ export class DatabaseStorage implements IStorage {
         action: "identity.fix_email", befiterId, adminUsername,
         fieldChanged: "rejectedEmailAtIntake", oldValue: existing.rejectedEmailAtIntake, newValue: null,
       }]);
+      // Also write to identity_updates so the change shows up in the audit log
+      // alongside other field changes.
+      await tx.insert(identityUpdates).values([
+        { befiterId, appName: "admin", fieldChanged: "email", oldValue: existing.email, newValue: e },
+        { befiterId, appName: "admin", fieldChanged: "rejectedEmailAtIntake", oldValue: existing.rejectedEmailAtIntake, newValue: null },
+      ]);
       const [identityRow] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
       const links = await tx.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
-      return serializeIdentity({ ...identityRow, appLinks: links });
+      const identity = serializeIdentity({ ...identityRow, appLinks: links });
+      // Resync downstream apps with the corrected email so caller systems can
+      // re-key on the real address instead of the quarantine placeholder.
+      await insertWebhookEventsTx(tx, "identity.updated", {
+        source_app: "admin",
+        changed_fields: ["email", "rejectedEmailAtIntake"],
+        identity,
+      });
+      return identity;
     });
   }
 
@@ -369,6 +430,9 @@ export class DatabaseStorage implements IStorage {
         const linkInserted = existingLink.length === 0;
         if (linkInserted) {
           await tx.insert(appLinks).values({ befiterId: existingByEmail.id, appName, appUserId, metadata });
+          if (metadata && "fitnessGoals" in metadata) {
+            await this.mirrorFitnessGoalsToLegacyTx(tx, existingByEmail.id);
+          }
         } else if (Object.keys(metadata).length > 0) {
           await this.upsertAppLinkMetadataTx(tx, existingByEmail.id, appName, metadata);
         }
@@ -401,8 +465,12 @@ export class DatabaseStorage implements IStorage {
       }).returning();
 
       await tx.insert(appLinks).values({ befiterId: newIdentity.id, appName, appUserId, metadata });
+      if (metadata && "fitnessGoals" in metadata) {
+        await this.mirrorFitnessGoalsToLegacyTx(tx, newIdentity.id);
+      }
       const links = await tx.select().from(appLinks).where(eq(appLinks.befiterId, newIdentity.id));
-      const identity = serializeIdentity({ ...newIdentity, appLinks: links });
+      const [refreshedIdentity] = await tx.select().from(befiterIds).where(eq(befiterIds.id, newIdentity.id)).limit(1);
+      const identity = serializeIdentity({ ...refreshedIdentity, appLinks: links });
       await insertWebhookEventsTx(tx, "identity.created", { source_app: appName, identity });
       return { identity, created: true };
     });
