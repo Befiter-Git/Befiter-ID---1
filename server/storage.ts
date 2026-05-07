@@ -178,6 +178,36 @@ export function extractMetadataBucket(body: Record<string, unknown>): {
   return { cleaned, metadata };
 }
 
+// Tolerant parse: tries to parse `input` against `schema`. If it fails, drops
+// any failing OPTIONAL top-level fields (i.e. fields not in `requiredKeys`)
+// and re-tries. Returns the parsed data plus a list of dropped fields so the
+// caller can surface a `field_dropped:<name>` warning.
+export function tolerantParse<T extends import("zod").ZodTypeAny>(
+  schema: T,
+  input: Record<string, unknown>,
+  requiredKeys: Set<string>,
+): { ok: true; data: import("zod").infer<T>; dropped: string[] } | { ok: false; error: import("zod").ZodError } {
+  const dropped: string[] = [];
+  let data: Record<string, unknown> = { ...input };
+  for (let i = 0; i < 50; i++) {
+    const result = schema.safeParse(data);
+    if (result.success) return { ok: true, data: result.data, dropped };
+    let progressed = false;
+    for (const issue of result.error.issues) {
+      const top = issue.path[0];
+      if (typeof top === "string" && !requiredKeys.has(top) && top in data) {
+        delete data[top];
+        if (!dropped.includes(top)) dropped.push(top);
+        progressed = true;
+      }
+    }
+    if (!progressed) return { ok: false, error: result.error };
+  }
+  const final = schema.safeParse(data);
+  if (final.success) return { ok: true, data: final.data, dropped };
+  return { ok: false, error: final.error };
+}
+
 export interface CreateOrUpdateOptions {
   metadata?: Record<string, unknown>;
   rejectedEmailAtIntake?: string | null;

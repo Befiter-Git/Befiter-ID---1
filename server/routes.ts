@@ -1,8 +1,9 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
-import { randomBytes } from "crypto";
-import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor } from "./storage";
+import { randomBytes, randomUUID } from "crypto";
+import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor, tolerantParse } from "./storage";
+import type { PatchBefiterId, UpdateBefiterId, InsertBefiterId } from "@shared/schema";
 import { retryWebhookNow, isChannelConfigured } from "./webhook-publisher";
 import { apiKeyAuth } from "./auth";
 import { requireAdminSession, sessionMiddleware } from "./admin-auth";
@@ -245,36 +246,66 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // Route fitnessGoals + unknown keys + provided metadata into per-app bucket
       const { cleaned, metadata } = extractMetadataBucket(incoming);
 
-      // Lenient email: if missing or malformed but phone is valid, quarantine raw value
-      let rejectedEmail: string | null = null;
+      // Lenient phone: try to normalise; if it fails or is missing, quarantine
+      // — but only if we have a valid email to anchor the identity.
       const rawEmail = typeof cleaned.email === "string" ? (cleaned.email as string).trim() : "";
-      let normalisedPhone: string;
-      try {
-        normalisedPhone = normalisePhone(String(cleaned.currentPhone ?? ""));
-      } catch (phoneErr: any) {
-        return res.status(422).json({ error: "Invalid phone number", details: phoneErr.message });
+      const emailIsValid = isValidEmail(rawEmail);
+      const rawPhone = String(cleaned.currentPhone ?? "").trim();
+      let normalisedPhone: string | null = null;
+      if (rawPhone) {
+        try { normalisedPhone = normalisePhone(rawPhone); } catch { normalisedPhone = null; }
       }
-      cleaned.currentPhone = normalisedPhone;
 
-      if (!isValidEmail(rawEmail)) {
+      // Reject only when BOTH contact methods are unusable
+      if (!emailIsValid && !normalisedPhone) {
+        return res.status(422).json({
+          error: "At least one usable contact method (email or phone) is required",
+          code: "VALIDATION_FAILED",
+        });
+      }
+
+      let rejectedEmail: string | null = null;
+      if (normalisedPhone) {
+        cleaned.currentPhone = normalisedPhone;
+      } else {
+        // Quarantine phone: store nothing in DB column would violate NOT NULL,
+        // so persist a unique placeholder; raw is preserved in metadata bucket.
+        const placeholder = `unknown-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+        cleaned.currentPhone = placeholder;
+        if (rawPhone) {
+          metadata.rejectedPhoneAtIntake = rawPhone;
+          warnings.push("phone_quarantined");
+        } else {
+          warnings.push("phone_missing");
+        }
+      }
+
+      if (!emailIsValid) {
         if (rawEmail) {
           rejectedEmail = rawEmail.slice(0, 254);
           warnings.push("email_quarantined");
         } else {
           warnings.push("email_missing");
         }
-        cleaned.email = quarantineEmailFor(normalisedPhone);
+        cleaned.email = quarantineEmailFor(String(cleaned.currentPhone));
       } else {
         cleaned.email = rawEmail;
       }
 
-      const parseResult = insertBefiterIdSchema.safeParse(cleaned);
-      if (!parseResult.success) {
-        return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
+      // Tolerant validation: drop any optional Group B field that fails
+      // schema-level checks rather than rejecting the whole intake.
+      const parsed = tolerantParse(
+        insertBefiterIdSchema,
+        cleaned,
+        new Set(["fullName", "currentPhone", "email"]),
+      );
+      if (!parsed.ok) {
+        return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
       }
+      for (const f of parsed.dropped) warnings.push(`field_dropped:${f}`);
 
       const result = await storage.createOrUpdateIdentity(
-        parseResult.data, req.appName!, appUserId,
+        parsed.data as InsertBefiterId, req.appName!, appUserId,
         { metadata, rejectedEmailAtIntake: rejectedEmail },
       );
 
@@ -325,30 +356,35 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         delete profileForPatch.email;
       }
 
-      const parseProfile = upsertBefiterIdSchema.omit({ appUserId: true }).safeParse(profileForPatch);
-      if (!parseProfile.success) {
+      const parseProfile = tolerantParse(
+        upsertBefiterIdSchema.omit({ appUserId: true }),
+        profileForPatch,
+        new Set(["fullName", "phone", "email"]),
+      );
+      if (!parseProfile.ok) {
         return res.status(400).json({ error: "Validation failed", details: parseProfile.error.flatten() });
       }
-      const normalisedProfileData = parseProfile.data as Record<string, unknown>;
+      for (const f of parseProfile.dropped) warnings.push(`field_dropped:${f}`);
+      const normalisedProfileData: PatchBefiterId = parseProfile.data as PatchBefiterId;
 
       const byAppUserId = await storage.lookupByAppUserId(appName, appUserId);
       if (byAppUserId) {
         if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
-          await storage.patchIdentity(byAppUserId.id, normalisedProfileData as any, appName, { metadata });
+          await storage.patchIdentity(byAppUserId.id, normalisedProfileData, appName, { metadata });
         }
         const identity = await storage.getIdentity(byAppUserId.id);
         return res.json({ identity, matched_by: "appUserId", warnings: warnings.length > 0 ? warnings : undefined });
       }
 
       if (typeof normalisedProfileData.email === "string") {
-        const byEmail = await storage.lookupByEmail(normalisedProfileData.email as string);
+        const byEmail = await storage.lookupByEmail(normalisedProfileData.email);
         if (byEmail) {
           const alreadyLinked = await storage.isAppLinked(byEmail.id, appName);
           if (!alreadyLinked) {
             return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link" });
           }
           if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
-            await storage.patchIdentity(byEmail.id, normalisedProfileData as any, appName, { metadata });
+            await storage.patchIdentity(byEmail.id, normalisedProfileData, appName, { metadata });
           }
           const identity = await storage.getIdentity(byEmail.id);
           return res.json({ identity, matched_by: "email", warnings: warnings.length > 0 ? warnings : undefined });
@@ -356,26 +392,49 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       if (typeof normalisedProfileData.phone === "string") {
-        const byPhone = await storage.lookupByCurrentPhone(normalisedProfileData.phone as string);
+        const byPhone = await storage.lookupByCurrentPhone(normalisedProfileData.phone);
         if (byPhone) {
           const alreadyLinked = await storage.isAppLinked(byPhone.id, appName);
           if (!alreadyLinked) {
             return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link" });
           }
           if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
-            await storage.patchIdentity(byPhone.id, normalisedProfileData as any, appName, { metadata });
+            await storage.patchIdentity(byPhone.id, normalisedProfileData, appName, { metadata });
           }
           const identity = await storage.getIdentity(byPhone.id);
           return res.json({ identity, matched_by: "phone", warnings: warnings.length > 0 ? warnings : undefined });
         }
       }
 
-      const fullName = normalisedProfileData.fullName as string | undefined;
-      const rawPhone = normalisedProfileData.phone as string | undefined;
-      if (!fullName || !rawPhone) {
-        return res.status(422).json({ error: "fullName and phone are required to create a new identity" });
+      // Create path: tolerant — accept if at least one of (email, phone) is usable.
+      const fullName = normalisedProfileData.fullName;
+      if (!fullName) {
+        return res.status(422).json({ error: "fullName is required to create a new identity", code: "VALIDATION_FAILED" });
       }
-      const normalisedPhoneForCreate = normalisePhone(rawPhone);
+      const phoneStr = typeof normalisedProfileData.phone === "string" ? normalisedProfileData.phone : "";
+      let createPhone: string;
+      let phoneQuarantined = false;
+      if (phoneStr) {
+        try { createPhone = normalisePhone(phoneStr); }
+        catch { createPhone = ""; }
+      } else { createPhone = ""; }
+
+      if (!emailIsValid && !createPhone) {
+        return res.status(422).json({
+          error: "At least one usable contact method (email or phone) is required",
+          code: "VALIDATION_FAILED",
+        });
+      }
+      if (!createPhone) {
+        createPhone = `unknown-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+        phoneQuarantined = true;
+        if (phoneStr) {
+          metadata.rejectedPhoneAtIntake = phoneStr;
+          warnings.push("phone_quarantined");
+        } else {
+          warnings.push("phone_missing");
+        }
+      }
 
       let createEmail: string;
       let rejectedEmail: string | null = null;
@@ -384,15 +443,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       } else {
         if (rawEmail) {
           rejectedEmail = rawEmail.slice(0, 254);
-        } else {
+        } else if (!warnings.includes("email_missing")) {
           warnings.push("email_missing");
         }
-        createEmail = quarantineEmailFor(normalisedPhoneForCreate);
+        createEmail = quarantineEmailFor(createPhone);
       }
 
       const { phone: _p, email: _e, ...restProfile } = normalisedProfileData;
+      const insertData: InsertBefiterId = {
+        ...(restProfile as Partial<InsertBefiterId>),
+        fullName,
+        email: createEmail,
+        currentPhone: createPhone,
+      } as InsertBefiterId;
       const result = await storage.createOrUpdateIdentity(
-        { ...restProfile, fullName, email: createEmail, currentPhone: normalisedPhoneForCreate } as Parameters<typeof storage.createOrUpdateIdentity>[0],
+        insertData,
         appName,
         appUserId,
         { metadata, rejectedEmailAtIntake: rejectedEmail },
@@ -420,6 +485,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const linked = existing.appLinks.some(l => l.appName === req.appName);
       if (!linked) return res.status(403).json({ error: "Forbidden - identity not linked to your application" });
 
+      const warnings: string[] = [];
       const body = { ...req.body };
       delete body.currentPhone;
       delete body.previousPhones;
@@ -429,13 +495,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       delete body.createdAt;
       delete body.identityTag;
 
-      const parseResult = updateBefiterIdSchema.safeParse(body);
-      if (!parseResult.success) {
+      // Route fitnessGoals + unknown keys + provided metadata into per-app bucket
+      const { cleaned, metadata } = extractMetadataBucket(body);
+
+      const parseResult = tolerantParse(updateBefiterIdSchema, cleaned, new Set());
+      if (!parseResult.ok) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
+      for (const f of parseResult.dropped) warnings.push(`field_dropped:${f}`);
 
-      const updated = await storage.updateIdentity(req.params.befiterId, parseResult.data, req.appName!);
-      return res.json({ identity: updated });
+      // updateIdentity writes to befiter_ids columns only — strip metadata key
+      // (it lives on app_links, not befiter_ids).
+      const { metadata: _md, ...columnData } = parseResult.data as Record<string, unknown>;
+
+      let updated;
+      if (Object.keys(columnData).length > 0) {
+        updated = await storage.updateIdentity(req.params.befiterId, columnData as UpdateBefiterId, req.appName!);
+      } else {
+        updated = existing;
+      }
+      if (Object.keys(metadata).length > 0) {
+        // patchIdentity with empty data still merges metadata into the per-app bucket
+        updated = await storage.patchIdentity(req.params.befiterId, {} as PatchBefiterId, req.appName!, { metadata });
+      }
+      return res.json({ identity: updated, warnings: warnings.length > 0 ? warnings : undefined });
     } catch (err) {
       console.error(err);
       return res.status(500).json({ error: "Failed to update identity" });
@@ -444,15 +527,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.patch("/api/identity/:id", apiKeyAuth, writeRateLimiter, async (req: Request, res: Response) => {
     try {
+      const warnings: string[] = [];
       const { cleaned, metadata } = extractMetadataBucket({ ...req.body });
       // Drop email if malformed - never let bad values overwrite a good email
       if (typeof cleaned.email === "string" && !isValidEmail((cleaned.email as string).trim())) {
         delete cleaned.email;
+        warnings.push("email_quarantined");
       }
-      const parseResult = patchBefiterIdSchema.safeParse(cleaned);
-      if (!parseResult.success) {
+      const parseResult = tolerantParse(patchBefiterIdSchema, cleaned, new Set());
+      if (!parseResult.ok) {
         return res.status(400).json({ error: "Validation failed", details: parseResult.error.flatten() });
       }
+      for (const f of parseResult.dropped) warnings.push(`field_dropped:${f}`);
       const linked = await storage.isAppLinked(req.params.id, req.appName!);
       if (!linked) return res.status(403).json({ error: "Forbidden - identity not linked to your application" });
 
@@ -466,7 +552,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       const updated = await storage.patchIdentity(req.params.id, data, req.appName!, { metadata });
-      return res.json({ identity: updated });
+      return res.json({ identity: updated, warnings: warnings.length > 0 ? warnings : undefined });
     } catch (err) {
       if (err instanceof IdentityNotFoundError || (err as { code?: string })?.code === "IDENTITY_NOT_FOUND") {
         return res.status(404).json({ error: "Identity not found" });
