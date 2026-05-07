@@ -585,6 +585,11 @@ export class DatabaseStorage implements IStorage {
 
     if (Object.keys(metadata).length > 0) {
       await this.upsertAppLinkMetadataTx(tx, befiterId, appName, metadata);
+      // Persist metadata audit entry in its own insert so it is not skipped
+      // by the earlier `auditEntries` insert above.
+      await tx.insert(identityUpdates).values([
+        { befiterId, appName, fieldChanged: "metadata", oldValue: null, newValue: JSON.stringify(metadata) },
+      ]);
       auditEntries.push({ befiterId, appName, fieldChanged: "metadata", oldValue: null, newValue: JSON.stringify(metadata) });
     }
 
