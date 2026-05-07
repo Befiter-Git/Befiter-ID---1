@@ -337,11 +337,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       // lookup but mark as quarantinable. We'll only 422 on the create path
       // when both contact methods are unusable.
       let upsertPhoneNormalisedOk = true;
+      const rawPhoneForCreate: string = cleaned.phone ? String(cleaned.phone) : "";
       if (cleaned.phone) {
         try {
           cleaned.phone = normalisePhone(String(cleaned.phone));
         } catch {
           upsertPhoneNormalisedOk = false;
+          // Never let an unparseable phone reach a PATCH and overwrite a
+          // good `currentPhone`. We still keep `rawPhoneForCreate` so the
+          // create branch below can quarantine it on a brand-new identity.
+          delete cleaned.phone;
+          warnings.push("phone_quarantined");
         }
       }
 
@@ -414,14 +420,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!fullName) {
         return res.status(422).json({ error: "fullName is required to create a new identity", code: "VALIDATION_FAILED" });
       }
-      const phoneStr = typeof normalisedProfileData.phone === "string" ? normalisedProfileData.phone : "";
+      const phoneStr = typeof normalisedProfileData.phone === "string"
+        ? normalisedProfileData.phone
+        : (rawPhoneForCreate || "");
       let createPhone: string;
       if (phoneStr && upsertPhoneNormalisedOk) {
         try { createPhone = normalisePhone(phoneStr); }
         catch { createPhone = ""; }
-      } else if (phoneStr) {
-        // raw value was kept but failed earlier normalisation — quarantine path
-        createPhone = "";
       } else { createPhone = ""; }
 
       if (!emailIsValid && !createPhone) {
@@ -430,11 +435,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           code: "VALIDATION_FAILED",
         });
       }
+      let phoneIsPlaceholder = false;
       if (!createPhone) {
         createPhone = `unknown-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
-        if (phoneStr) {
-          metadata.rejectedPhoneAtIntake = phoneStr;
-          warnings.push("phone_quarantined");
+        phoneIsPlaceholder = true;
+        if (rawPhoneForCreate) {
+          metadata.rejectedPhoneAtIntake = rawPhoneForCreate;
+          if (!warnings.includes("phone_quarantined")) warnings.push("phone_quarantined");
         } else {
           warnings.push("phone_missing");
         }

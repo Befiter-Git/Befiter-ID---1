@@ -401,7 +401,12 @@ export class DatabaseStorage implements IStorage {
         .where(eq(befiterIds.email, data.email.toLowerCase())).limit(1);
 
       if (existingByEmail) {
-        const samePhone = existingByEmail.currentPhone === data.currentPhone;
+        // Never overwrite an existing real phone with a quarantine placeholder
+        // (`unknown-…`). If the incoming phone is a placeholder, treat phone
+        // as "no change" for an already-known identity.
+        const incomingIsPlaceholder = typeof data.currentPhone === "string"
+          && data.currentPhone.startsWith("unknown-");
+        const samePhone = existingByEmail.currentPhone === data.currentPhone || incomingIsPlaceholder;
         const auditEntries: { befiterId: string; appName: string; fieldChanged: string; oldValue: string | null; newValue: string | null }[] = [];
 
         if (!samePhone) {
