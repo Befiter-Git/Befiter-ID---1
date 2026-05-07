@@ -934,27 +934,26 @@ export class DatabaseStorage implements IStorage {
     return !!link;
   }
 
-  async createLead(data: InsertLead, appName: string): Promise<Lead> {
-    const [lead] = await db.insert(leads).values({ ...data, appName }).returning();
+  async createLead(data: InsertLead, _appName: string): Promise<Lead> {
+    const [lead] = await db.insert(leads).values(data).returning();
     return lead;
   }
 
-  async patchLead(id: string, data: PatchLead, appName: string): Promise<Lead> {
+  async patchLead(id: string, data: PatchLead, _appName: string): Promise<Lead> {
     const [existing] = await db.select().from(leads)
-      .where(and(eq(leads.id, id), eq(leads.appName, appName)))
+      .where(eq(leads.id, id))
       .limit(1);
     if (!existing) throw new LeadNotFoundError();
-    const { appName: _stripped, ...safeData } = data as PatchLead & { appName?: unknown };
     const [updated] = await db.update(leads)
-      .set({ ...safeData, updatedAt: new Date() })
+      .set({ ...data, updatedAt: new Date() })
       .where(eq(leads.id, id))
       .returning();
     return updated;
   }
 
-  async getLeadByStoreId(storeLeadId: string, appName: string): Promise<Lead | undefined> {
+  async getLeadByStoreId(storeLeadId: string, _appName: string): Promise<Lead | undefined> {
     const [result] = await db.select().from(leads)
-      .where(and(eq(leads.storeLeadId, storeLeadId), eq(leads.appName, appName)))
+      .where(eq(leads.storeLeadId, storeLeadId))
       .limit(1);
     return result;
   }

@@ -224,7 +224,6 @@ export type BefiterIdWithLinks = BefiterId & { appLinks: AppLink[] };
 
 export const leads = pgTable("leads", {
   id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
-  appName: text("app_name"),
   storeLeadId: text("store_lead_id").notNull().unique(),
   fullName: text("full_name").notNull(),
   phone: text("phone").notNull(),
@@ -247,7 +246,6 @@ const numericField = z.union([z.string().max(20), z.number()]).transform(v => St
 
 export const insertLeadSchema = createInsertSchema(leads).omit({
   id: true,
-  appName: true,
   createdAt: true,
   updatedAt: true,
 }).extend({
