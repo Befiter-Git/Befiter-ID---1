@@ -207,13 +207,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       if (identity) {
-        const linked = await storage.isAppLinked(identity.id, req.appName!);
-        if (!linked) {
-          return res.json({ found: false });
+        const appUserId = (req.query.appUserId as string | undefined)?.trim();
+        let linked = await storage.isAppLinked(identity.id, req.appName!);
+        if (!linked && appUserId) {
+          await storage.ensureAppLink(identity.id, req.appName!, appUserId);
+          linked = true;
         }
         await storage.incrementDuplicatePrevention();
         const fullIdentity = await storage.getIdentity(identity.id);
-        return res.json({ found: true, matched_by: matchedBy, identity: fullIdentity ? scopeFitnessGoalsToApp(fullIdentity, req.appName!) : fullIdentity });
+        return res.json({
+          found: true,
+          matched_by: matchedBy,
+          linked,
+          identity: fullIdentity ? scopeFitnessGoalsToApp(fullIdentity, req.appName!) : fullIdentity,
+        });
       }
 
       return res.json({ found: false });
@@ -393,10 +400,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (typeof normalisedProfileData.email === "string") {
         const byEmail = await storage.lookupByEmail(normalisedProfileData.email);
         if (byEmail) {
-          const alreadyLinked = await storage.isAppLinked(byEmail.id, appName);
-          if (!alreadyLinked) {
-            return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link", befiter_id: byEmail.id });
-          }
+          await storage.ensureAppLink(byEmail.id, appName, appUserId);
           if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
             await storage.patchIdentity(byEmail.id, normalisedProfileData, appName, { metadata });
           }
@@ -408,10 +412,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (typeof normalisedProfileData.phone === "string") {
         const byPhone = await storage.lookupByCurrentPhone(normalisedProfileData.phone);
         if (byPhone) {
-          const alreadyLinked = await storage.isAppLinked(byPhone.id, appName);
-          if (!alreadyLinked) {
-            return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link", befiter_id: byPhone.id });
-          }
+          await storage.ensureAppLink(byPhone.id, appName, appUserId);
           if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
             await storage.patchIdentity(byPhone.id, normalisedProfileData, appName, { metadata });
           }

@@ -37,9 +37,9 @@ All require `x-api-key` header:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/identity/lookup` | Email-first lookup, returns `matched_by: "email"\|"phone"`, increments dup-prevention counter |
+| GET | `/api/identity/lookup` | Email-first lookup, returns `matched_by: "email"\|"phone"`, `linked: bool`, increments dup-prevention counter; pass `appUserId` to auto-link on the spot |
 | POST | `/api/identity/create` | Smart upsert by email: 201 if new, 200 if existing; updates phone if changed |
-| PUT | `/api/identity/upsert` | Idempotent upsert: looks up by appUserId→email→phone→create; returns `matched_by` + identity; 201 on create, 200 on match; **403 includes `befiter_id`** when identity exists but is unlinked |
+| PUT | `/api/identity/upsert` | Idempotent upsert: looks up by appUserId→email→phone→create; auto-links calling app on email/phone match; returns `matched_by` + identity; 201 on create, 200 on match |
 | PUT | `/api/identity/:id` | Partial update (currentPhone/email immutable) + audit log |
 | PATCH | `/api/identity/:id` | Partial patch with phone archiving + email uniqueness; 404 if not found, 409 if email taken |
 | POST | `/api/identity/:id/link` | Link another app to existing identity |
