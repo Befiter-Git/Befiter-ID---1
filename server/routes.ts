@@ -395,7 +395,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         if (byEmail) {
           const alreadyLinked = await storage.isAppLinked(byEmail.id, appName);
           if (!alreadyLinked) {
-            return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link" });
+            return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link", befiter_id: byEmail.id });
           }
           if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
             await storage.patchIdentity(byEmail.id, normalisedProfileData, appName, { metadata });
@@ -410,7 +410,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         if (byPhone) {
           const alreadyLinked = await storage.isAppLinked(byPhone.id, appName);
           if (!alreadyLinked) {
-            return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link" });
+            return res.status(403).json({ error: "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link", befiter_id: byPhone.id });
           }
           if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
             await storage.patchIdentity(byPhone.id, normalisedProfileData, appName, { metadata });

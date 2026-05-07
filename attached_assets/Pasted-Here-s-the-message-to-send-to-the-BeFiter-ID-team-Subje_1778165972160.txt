@@ -1,0 +1,38 @@
+Here's the message to send to the BeFiter ID team:
+
+Subject: Link Endpoint Spec Needed — Cross-App Identity Linking
+
+Hi team,
+
+We're integrating befiter.com (social fitness app) with BeFiter ID and running into a specific scenario we need your help resolving.
+
+What's happening:
+When a member who is already registered in befiter.store CRM signs up on befiter.com, our upsert call (PUT /api/identity/upsert) returns:
+
+403 — "Forbidden - identity exists but is not linked to your application; use the link endpoint to establish a verified link"
+
+This makes sense — their identity was created by befiter.store, and befiter.com doesn't have permission to claim it via upsert. We understand and respect that.
+
+What we need:
+The spec for the link endpoint your error message refers to. Specifically:
+
+The URL and HTTP method (e.g. POST /api/identity/link)
+The request body format — what fields do we send to establish the verified link?
+How does BeFiter ID verify that we have the right to link to an existing identity (by matching email, phone, appUserId, or something else)?
+Does the response return the befiter_id we should store on our side?
+Why we need it:
+We have existing members who are in both befiter.store and befiter.com. Right now, their befiter.com signup works fine but their identity stays unlinked in BeFiter ID — so the cross-platform benefits (unified profile, shared history) don't apply to them. Once we have this endpoint, we can link them automatically during signup and also run a one-time backfill for the ones already affected.
+
+Current affected count: 6 members (and will grow as more befiter.store gym members join the social app).
+
+Is our overall approach correct?
+We are currently:
+
+Sending currentPhone (E.164 format) for phone
+Sending fitnessGoals inside metadata (per your updated guide)
+Calling PUT /api/identity/upsert on every new active-user signup
+Does this flow look right to you, or do you recommend any changes?
+
+Thanks
+
+Send that across and share whatever they reply with — I'll implement the link endpoint the same day.
