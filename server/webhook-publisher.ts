@@ -1,5 +1,6 @@
 import { createHmac } from "crypto";
 import { storage } from "./storage";
+import { registerWebhookWorkerWakeHandler } from "./webhook-worker-signal";
 import type { WebhookDestination, WebhookEvent } from "@shared/schema";
 
 const RETRY_SCHEDULE_MS = [
@@ -9,6 +10,8 @@ const RETRY_SCHEDULE_MS = [
   60 * 60 * 1000,
   6 * 60 * 60 * 1000,
 ];
+const WEBHOOK_BATCH_SIZE = 20;
+const DATABASE_ERROR_RETRY_MS = 6 * 60 * 1000;
 
 interface ChannelConfig {
   url: string | undefined;
@@ -89,14 +92,39 @@ async function scheduleRetry(event: WebhookEvent, errorMsg: string): Promise<voi
   await storage.markWebhookFailed(event.id, errorMsg, nextAt);
 }
 
-let workerHandle: NodeJS.Timeout | null = null;
+let workerStarted = false;
+let workerTimer: NodeJS.Timeout | null = null;
 let isRunning = false;
+let rerunRequested = false;
+
+function scheduleWorker(delayMs: number): void {
+  if (!workerStarted) return;
+  if (workerTimer) clearTimeout(workerTimer);
+  workerTimer = setTimeout(() => {
+    workerTimer = null;
+    void tick();
+  }, Math.max(0, delayMs));
+}
+
+function wakeWorker(): void {
+  if (!workerStarted) return;
+  if (isRunning) {
+    rerunRequested = true;
+    return;
+  }
+  scheduleWorker(0);
+}
 
 async function tick(): Promise<void> {
-  if (isRunning) return;
+  if (isRunning) {
+    rerunRequested = true;
+    return;
+  }
   isRunning = true;
+  rerunRequested = false;
+  let nextDelayMs: number | null = null;
   try {
-    const due = await storage.claimPendingWebhookEvents(20);
+    const due = await storage.claimPendingWebhookEvents(WEBHOOK_BATCH_SIZE);
     for (const event of due) {
       try {
         await deliverOne(event);
@@ -106,17 +134,34 @@ async function tick(): Promise<void> {
           .catch(e => console.error("[webhook-worker] scheduleRetry failed", e));
       }
     }
+    if (due.length === WEBHOOK_BATCH_SIZE) {
+      nextDelayMs = 0;
+    } else {
+      const nextAttemptAt = await storage.getNextPendingWebhookAt();
+      if (nextAttemptAt) {
+        nextDelayMs = Math.max(0, nextAttemptAt.getTime() - Date.now());
+      }
+    }
+  } catch (err) {
+    console.error("[webhook-worker] tick failed", err);
+    nextDelayMs = DATABASE_ERROR_RETRY_MS;
   } finally {
     isRunning = false;
+    if (rerunRequested) {
+      scheduleWorker(0);
+    } else if (nextDelayMs !== null) {
+      scheduleWorker(nextDelayMs);
+    }
   }
 }
 
 export function startWebhookWorker(): void {
-  if (workerHandle) return;
-  workerHandle = setInterval(() => {
-    tick().catch(err => console.error("[webhook-worker] tick failed", err));
-  }, 30_000);
-  setTimeout(() => tick().catch(() => {}), 2_000);
+  if (workerStarted) return;
+  workerStarted = true;
+  registerWebhookWorkerWakeHandler(wakeWorker);
+  // Recover due events after a deployment restart, then only wake again when
+  // a new event arrives or the next retry becomes due.
+  scheduleWorker(0);
 }
 
 export async function retryWebhookNow(eventId: string): Promise<void> {

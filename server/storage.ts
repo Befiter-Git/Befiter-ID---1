@@ -1,6 +1,7 @@
 import { eq, ilike, or, and, sql, lte, desc, inArray } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { db } from "./db";
+import { wakeWebhookWorker } from "./webhook-worker-signal";
 import {
   befiterIds, appLinks, apiKeys, identityUpdates, stats, leads, webhookEvents, adminAuditLog,
   type BefiterId, type InsertBefiterId, type UpdateBefiterId, type PatchBefiterId,
@@ -10,6 +11,12 @@ import {
 } from "@shared/schema";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function transactionWithWebhookWake<T>(callback: (tx: Tx) => Promise<T>): Promise<T> {
+  const result = await db.transaction(callback);
+  wakeWebhookWorker();
+  return result;
+}
 
 function buildEnvelopeJson(eventType: WebhookEventType, eventId: string, data: Record<string, unknown>): string {
   return JSON.stringify({
@@ -298,6 +305,7 @@ export interface IStorage {
   ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void>;
   createWebhookEvent(data: { eventId: string; eventType: string; destination: WebhookDestination; payload: string }): Promise<WebhookEvent>;
   claimPendingWebhookEvents(limit: number): Promise<WebhookEvent[]>;
+  getNextPendingWebhookAt(): Promise<Date | undefined>;
   markWebhookDelivered(id: string): Promise<void>;
   markWebhookFailed(id: string, errorMsg: string, nextAttemptAt: Date | null): Promise<void>;
   markWebhookDead(id: string, errorMsg: string): Promise<void>;
@@ -378,7 +386,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async clearRejectedEmail(befiterId: string, newEmail: string, adminUsername: string): Promise<SerializedBefiterIdWithLinks> {
-    return await db.transaction(async (tx) => {
+    return await transactionWithWebhookWake(async (tx) => {
       const [existing] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
       if (!existing) throw new IdentityNotFoundError();
       const e = newEmail.trim().toLowerCase();
@@ -418,7 +426,7 @@ export class DatabaseStorage implements IStorage {
   async createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string, opts?: CreateOrUpdateOptions): Promise<CreateOrUpdateResult> {
     const metadata = opts?.metadata ?? {};
     const rejectedEmail = opts?.rejectedEmailAtIntake ?? null;
-    return await db.transaction(async (tx) => {
+    return await transactionWithWebhookWake(async (tx) => {
       const [existingByEmail] = await tx.select().from(befiterIds)
         .where(eq(befiterIds.email, data.email.toLowerCase())).limit(1);
 
@@ -504,7 +512,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks> {
-    return await db.transaction(async (tx) => {
+    return await transactionWithWebhookWake(async (tx) => {
       const [existing] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
       if (!existing) throw new IdentityNotFoundError();
 
@@ -544,7 +552,7 @@ export class DatabaseStorage implements IStorage {
 
   async patchIdentity(befiterId: string, data: PatchBefiterId, appName: string, opts?: { metadata?: Record<string, unknown> }): Promise<SerializedBefiterIdWithLinks> {
    const metadata = opts?.metadata ?? {};
-   return await db.transaction(async (tx) => {
+   return await transactionWithWebhookWake(async (tx) => {
     const [existing] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
     if (!existing) throw new IdentityNotFoundError();
 
@@ -667,7 +675,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async linkApp(befiterId: string, appName: string, appUserId: string): Promise<AppLink> {
-    return await db.transaction(async (tx) => {
+    return await transactionWithWebhookWake(async (tx) => {
       const [link] = await tx.insert(appLinks).values({ befiterId, appName, appUserId }).returning();
       const [identityRow] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
       const links = await tx.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
@@ -998,6 +1006,7 @@ export class DatabaseStorage implements IStorage {
       destination: data.destination,
       payload: data.payload,
     }).returning();
+    wakeWebhookWorker();
     return row;
   }
 
@@ -1026,6 +1035,14 @@ export class DatabaseStorage implements IStorage {
         .where(inArray(webhookEvents.id, ids));
       return rows;
     });
+  }
+
+  async getNextPendingWebhookAt(): Promise<Date | undefined> {
+    const [row] = await db.select({
+      nextAttemptAt: sql<Date | null>`min(${webhookEvents.nextAttemptAt})`,
+    }).from(webhookEvents)
+      .where(eq(webhookEvents.status, "pending"));
+    return row?.nextAttemptAt ?? undefined;
   }
 
   async markWebhookDelivered(id: string): Promise<void> {
@@ -1064,6 +1081,7 @@ export class DatabaseStorage implements IStorage {
       lastError: null,
       updatedAt: new Date(),
     }).where(eq(webhookEvents.id, id));
+    wakeWebhookWorker();
   }
 
   async listWebhookEvents(status: string | undefined, limit: number): Promise<WebhookEvent[]> {
