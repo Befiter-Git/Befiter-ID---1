@@ -39,7 +39,8 @@ All require `x-api-key` header:
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/identity/lookup` | Looks up email/phone, rejects conflicting matches, returns `matched_by`, `linked`, and caller-specific current-contact verification status; pass `appUserId` to auto-link on the spot |
-| POST | `/api/identity/:id/contact-verifications` | Server-to-server OTP attestation for an exact current email or phone; requires the caller's API key and records app/time/context |
+| POST | `/api/identity/:id/contact-verifications` | Server-to-server OTP attestation for an exact current email or phone; can issue a short-lived, single-use reassociation proof |
+| POST | `/api/identity/:id/reassociate-app-user` | Replaces an existing BeFiter.com Social user association after a bound OTP attestation |
 | POST | `/api/identity/create` | Smart upsert by email: 201 if new, 200 if existing; updates phone if changed |
 | PUT | `/api/identity/upsert` | Idempotent upsert: looks up by appUserId→email→phone→create; auto-links calling app on email/phone match; returns `matched_by` + identity; 201 on create, 200 on match |
 | PUT | `/api/identity/:id` | Partial update (currentPhone/email immutable) + audit log |
@@ -170,6 +171,44 @@ Content-Type: application/json
 Use `phone` with `phone_otp` for phone verification. Email is trimmed/lowercased and phone is normalized before the service checks it against the identity's current contact. A mismatch returns `409 CONTACT_MISMATCH`; browser-origin requests are rejected. The app identity is taken from the API key, never from the request body.
 
 Lookup returns `contact_verification.email` and `.phone`, each with `verified`, `verified_by_app`, and `verified_at`. Status is scoped to the calling app. Existing identities start unverified, and changing a contact invalidates its previous attestations. The API key must remain on the app backend; matching contact text or linking an app does not create verification status.
+
+### BeFiter.com returning-user reassociation
+
+This API is implemented in development. A production release is still required before production callers can use it.
+
+After BeFiter.com completes OTP for the identity's current contact, it must submit a purpose- and subject-bound attestation:
+
+```json
+{
+  "contactType": "email",
+  "contactValue": "person@example.test",
+  "context": {
+    "method": "email_otp",
+    "reference": "5f47e3ba-7c1b-45a6-bc5a-bcf5a7d83289",
+    "purpose": "app_user_reassociation",
+    "subjectAppUserId": "social-new-123"
+  }
+}
+```
+
+The reference must be unique and at least 32 characters. The attestation is valid for 10 minutes and can be consumed once. Reassociation requires the authenticated API key to resolve to `befiter_com`, the expected old Social ID to match the existing BeFiter.com link, and the new Social ID not to be linked to another identity.
+
+```http
+POST /api/identity/<befiterId>/reassociate-app-user
+x-api-key: <BeFiter.com server-side key>
+Idempotency-Key: <unique request key>
+Content-Type: application/json
+```
+
+```json
+{
+  "expectedAppUserId": "social-old-123",
+  "newAppUserId": "social-new-123",
+  "attestationReference": "5f47e3ba-7c1b-45a6-bc5a-bcf5a7d83289"
+}
+```
+
+Success returns `reassociated`, the updated `identity.appLinks` array, and `reassociation.previousAppUserId`, `reassociation.newAppUserId`, timestamps, and audit ID. Repeating the same request with the same idempotency key returns the prior result. Only the existing `befiter_com` app-user ID is changed; the central identity and all `befiter_store` links are preserved.
 
 ## Leads & Dashboard (Step 4)
 

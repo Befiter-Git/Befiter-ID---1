@@ -8,6 +8,7 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
+    "test:reassociation": "tsx --test server/app-link-reassociation.test.ts",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {

@@ -56,7 +56,10 @@ export const appLinks = pgTable("app_links", {
   appUserId: text("app_user_id").notNull(),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().default(sql`'{}'::jsonb`),
   linkedAt: timestamp("linked_at").defaultNow(),
-});
+}, (table) => ({
+  identityAppUnique: uniqueIndex("app_links_identity_app_uq").on(table.befiterId, table.appName),
+  appUserUnique: uniqueIndex("app_links_app_user_uq").on(table.appName, table.appUserId),
+}));
 
 export const apiKeys = pgTable("api_keys", {
   id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
@@ -314,7 +317,12 @@ export const contactVerifications = pgTable("contact_verifications", {
   contactValue: text("contact_value").notNull(),
   verifiedByApp: text("verified_by_app").notNull(),
   verificationContext: jsonb("verification_context")
-    .$type<{ method: "email_otp" | "phone_otp"; reference?: string }>()
+    .$type<{
+      method: "email_otp" | "phone_otp";
+      reference?: string;
+      purpose?: "app_user_reassociation";
+      subjectAppUserId?: string;
+    }>()
     .notNull()
     .default(sql`'{}'::jsonb`),
   verifiedAt: timestamp("verified_at").notNull().defaultNow(),
@@ -329,6 +337,45 @@ export type AdminAuditLog = typeof adminAuditLog.$inferSelect;
 export type WebhookEvent = typeof webhookEvents.$inferSelect;
 export type ContactVerification = typeof contactVerifications.$inferSelect;
 export type ContactVerificationType = "email" | "phone";
+
+export const contactVerificationChallenges = pgTable("contact_verification_challenges", {
+  id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
+  befiterId: varchar("befiter_id", { length: 50 }).notNull()
+    .references(() => befiterIds.id, { onDelete: "cascade" }),
+  contactType: text("contact_type").notNull(),
+  contactValue: text("contact_value").notNull(),
+  verifiedByApp: text("verified_by_app").notNull(),
+  purpose: text("purpose").notNull(),
+  subjectAppUserId: text("subject_app_user_id").notNull(),
+  reference: text("reference").notNull(),
+  verifiedAt: timestamp("verified_at").notNull().defaultNow(),
+  consumedAt: timestamp("consumed_at"),
+  invalidatedAt: timestamp("invalidated_at"),
+}, (table) => ({
+  referenceUnique: uniqueIndex("contact_verification_challenges_reference_uq").on(table.reference),
+}));
+
+export type ContactVerificationChallenge = typeof contactVerificationChallenges.$inferSelect;
+export type ContactVerificationPurpose = "app_user_reassociation";
+
+export const appLinkReassociations = pgTable("app_link_reassociations", {
+  id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
+  befiterId: varchar("befiter_id", { length: 50 }).notNull(),
+  appName: text("app_name").notNull(),
+  previousAppUserId: text("previous_app_user_id").notNull(),
+  newAppUserId: text("new_app_user_id").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  attestationReference: text("attestation_reference").notNull(),
+  verifiedAt: timestamp("verified_at").notNull(),
+  changedAt: timestamp("changed_at").notNull().defaultNow(),
+}, (table) => ({
+  appIdempotencyUnique: uniqueIndex("app_link_reassociations_app_idempotency_uq")
+    .on(table.appName, table.idempotencyKey),
+  attestationReferenceUnique: uniqueIndex("app_link_reassociations_attestation_ref_uq")
+    .on(table.attestationReference),
+}));
+
+export type AppLinkReassociation = typeof appLinkReassociations.$inferSelect;
 export type WebhookStatus = "pending" | "success" | "failed" | "dead";
 export type WebhookDestination = "com" | "store";
 export type WebhookEventType =

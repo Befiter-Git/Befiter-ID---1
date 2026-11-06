@@ -3,13 +3,24 @@ import { randomUUID } from "crypto";
 import { db } from "./db";
 import { wakeWebhookWorker } from "./webhook-worker-signal";
 import {
-  befiterIds, appLinks, apiKeys, identityUpdates, stats, leads, webhookEvents, contactVerifications, adminAuditLog,
+  befiterIds, appLinks, apiKeys, identityUpdates, stats, leads, webhookEvents, contactVerifications,
+  contactVerificationChallenges, appLinkReassociations, adminAuditLog,
   type BefiterId, type InsertBefiterId, type UpdateBefiterId, type PatchBefiterId,
   type AppLink, type ApiKey, type IdentityUpdate, type BefiterIdWithLinks,
   type Lead, type InsertLead, type PatchLead,
   type WebhookEvent, type WebhookDestination, type WebhookEventType,
-  type ContactVerification, type ContactVerificationType,
+  type ContactVerification, type ContactVerificationType, type ContactVerificationChallenge,
+  type AppLinkReassociation,
 } from "@shared/schema";
+import {
+  ReassociationError,
+  reassociateAppUserInTransaction,
+  type ReassociationAppLink,
+  type ReassociationChallenge,
+  type ReassociationIdentity,
+  type ReassociationInput,
+  type ReassociationTransaction,
+} from "./app-link-reassociation";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -24,6 +35,13 @@ async function invalidateContactVerificationsTx(
       eq(contactVerifications.befiterId, befiterId),
       eq(contactVerifications.contactType, contactType),
       isNull(contactVerifications.invalidatedAt),
+    ));
+  await tx.update(contactVerificationChallenges)
+    .set({ invalidatedAt: new Date() })
+    .where(and(
+      eq(contactVerificationChallenges.befiterId, befiterId),
+      eq(contactVerificationChallenges.contactType, contactType),
+      isNull(contactVerificationChallenges.invalidatedAt),
     ));
 }
 
@@ -79,6 +97,16 @@ export class IdentityNotFoundError extends Error {
 export class ContactVerificationMismatchError extends Error {
   code = "CONTACT_MISMATCH" as const;
   constructor() { super("Contact does not match the current identity record"); }
+}
+
+export class ContactVerificationReferenceConflictError extends Error {
+  code = "ATTESTATION_REFERENCE_CONFLICT" as const;
+  constructor() { super("Contact verification reference is already bound to another request"); }
+}
+
+export class ContactVerificationReferenceUsedError extends Error {
+  code = "ATTESTATION_REFERENCE_USED" as const;
+  constructor() { super("Contact verification reference has already been consumed"); }
 }
 
 export interface DashboardStats {
@@ -331,7 +359,8 @@ export interface IStorage {
     contactValue: string;
     verifiedByApp: string;
     verificationContext: ContactVerification["verificationContext"];
-  }): Promise<ContactVerification>;
+  }): Promise<{ verification: ContactVerification; challenge?: ContactVerificationChallenge }>;
+  reassociateAppUser(input: ReassociationInput): Promise<Awaited<ReturnType<typeof reassociateAppUserInTransaction>>>;
   getContactVerification(
     befiterId: string,
     contactType: ContactVerificationType,
@@ -1071,7 +1100,7 @@ export class DatabaseStorage implements IStorage {
     contactValue: string;
     verifiedByApp: string;
     verificationContext: ContactVerification["verificationContext"];
-  }): Promise<ContactVerification> {
+  }): Promise<{ verification: ContactVerification; challenge?: ContactVerificationChallenge }> {
     return db.transaction(async (tx) => {
       await tx.execute(sql`
         SELECT ${befiterIds.id}
@@ -1089,6 +1118,51 @@ export class DatabaseStorage implements IStorage {
         : identity.currentPhone;
       if (currentValue !== input.contactValue) {
         throw new ContactVerificationMismatchError();
+      }
+
+      const context = input.verificationContext;
+      const hasReassociationPurpose = context.purpose === "app_user_reassociation";
+      if (hasReassociationPurpose !== Boolean(context.subjectAppUserId)
+        || (hasReassociationPurpose && !context.reference)) {
+        throw new ContactVerificationReferenceConflictError();
+      }
+
+      let challenge: ContactVerificationChallenge | undefined;
+      if (hasReassociationPurpose && context.reference && context.subjectAppUserId) {
+        const [usedAudit] = await tx.select({ id: appLinkReassociations.id })
+          .from(appLinkReassociations)
+          .where(eq(appLinkReassociations.attestationReference, context.reference))
+          .limit(1);
+        if (usedAudit) throw new ContactVerificationReferenceUsedError();
+
+        const [existingChallenge] = await tx.select().from(contactVerificationChallenges)
+          .where(eq(contactVerificationChallenges.reference, context.reference))
+          .limit(1);
+        if (existingChallenge) {
+          const sameBinding = existingChallenge.befiterId === input.befiterId
+            && existingChallenge.contactType === input.contactType
+            && existingChallenge.contactValue === input.contactValue
+            && existingChallenge.verifiedByApp === input.verifiedByApp
+            && existingChallenge.purpose === context.purpose
+            && existingChallenge.subjectAppUserId === context.subjectAppUserId;
+          if (!sameBinding) throw new ContactVerificationReferenceConflictError();
+          if (existingChallenge.consumedAt) throw new ContactVerificationReferenceUsedError();
+          if (existingChallenge.invalidatedAt) throw new ContactVerificationReferenceConflictError();
+          challenge = existingChallenge;
+        }
+      }
+
+      if (!challenge) {
+        // A new OTP for the same app/contact supersedes any pending reassociation proof.
+        await tx.update(contactVerificationChallenges)
+          .set({ invalidatedAt: new Date() })
+          .where(and(
+            eq(contactVerificationChallenges.befiterId, input.befiterId),
+            eq(contactVerificationChallenges.contactType, input.contactType),
+            eq(contactVerificationChallenges.contactValue, input.contactValue),
+            eq(contactVerificationChallenges.verifiedByApp, input.verifiedByApp),
+            isNull(contactVerificationChallenges.invalidatedAt),
+          ));
       }
 
       const [verification] = await tx.insert(contactVerifications).values({
@@ -1112,8 +1186,177 @@ export class DatabaseStorage implements IStorage {
           invalidatedAt: null,
         },
       }).returning();
-      return verification;
+
+      if (hasReassociationPurpose && context.reference && context.subjectAppUserId && !challenge) {
+        const [insertedChallenge] = await tx.insert(contactVerificationChallenges).values({
+          befiterId: input.befiterId,
+          contactType: input.contactType,
+          contactValue: input.contactValue,
+          verifiedByApp: input.verifiedByApp,
+          purpose: "app_user_reassociation",
+          subjectAppUserId: context.subjectAppUserId,
+          reference: context.reference,
+          verifiedAt: new Date(),
+        }).onConflictDoNothing({
+          target: contactVerificationChallenges.reference,
+        }).returning();
+
+        if (insertedChallenge) {
+          challenge = insertedChallenge;
+        } else {
+          const [conflictingChallenge] = await tx.select().from(contactVerificationChallenges)
+            .where(eq(contactVerificationChallenges.reference, context.reference))
+            .limit(1);
+          const sameBinding = conflictingChallenge
+            && conflictingChallenge.befiterId === input.befiterId
+            && conflictingChallenge.contactType === input.contactType
+            && conflictingChallenge.contactValue === input.contactValue
+            && conflictingChallenge.verifiedByApp === input.verifiedByApp
+            && conflictingChallenge.purpose === context.purpose
+            && conflictingChallenge.subjectAppUserId === context.subjectAppUserId;
+          if (!sameBinding) throw new ContactVerificationReferenceConflictError();
+          if (conflictingChallenge.consumedAt) throw new ContactVerificationReferenceUsedError();
+          if (conflictingChallenge.invalidatedAt) throw new ContactVerificationReferenceConflictError();
+          challenge = conflictingChallenge;
+        }
+      }
+
+      return { verification, challenge };
     });
+  }
+
+  async reassociateAppUser(input: ReassociationInput): Promise<Awaited<ReturnType<typeof reassociateAppUserInTransaction>>> {
+    try {
+      return await db.transaction(async (tx) => {
+        const repository: ReassociationTransaction = {
+          lockKeys: async (appName, idempotencyKey, newAppUserId) => {
+            await tx.execute(sql`
+              SELECT pg_advisory_xact_lock(
+                hashtextextended(${"reassociation-idempotency:" + appName + ":" + idempotencyKey}, 0)
+              )
+            `);
+            await tx.execute(sql`
+              SELECT pg_advisory_xact_lock(
+                hashtextextended(${"reassociation-app-user:" + appName + ":" + newAppUserId}, 0)
+              )
+            `);
+          },
+          findAuditByIdempotencyKey: async (appName, key) => {
+            const [row] = await tx.select().from(appLinkReassociations)
+              .where(and(
+                eq(appLinkReassociations.appName, appName),
+                eq(appLinkReassociations.idempotencyKey, key),
+              ))
+              .limit(1);
+            return row as AppLinkReassociation | undefined;
+          },
+          lockIdentity: async (befiterId) => {
+            await tx.execute(sql`
+              SELECT ${befiterIds.id}
+              FROM ${befiterIds}
+              WHERE ${befiterIds.id} = ${befiterId}
+              FOR UPDATE
+            `);
+            const [row] = await tx.select({
+              id: befiterIds.id,
+              email: befiterIds.email,
+              currentPhone: befiterIds.currentPhone,
+            }).from(befiterIds)
+              .where(eq(befiterIds.id, befiterId))
+              .limit(1);
+            return row;
+          },
+          lockChallenge: async (reference) => {
+            await tx.execute(sql`
+              SELECT ${contactVerificationChallenges.id}
+              FROM ${contactVerificationChallenges}
+              WHERE ${contactVerificationChallenges.reference} = ${reference}
+              FOR UPDATE
+            `);
+            const [row] = await tx.select().from(contactVerificationChallenges)
+              .where(eq(contactVerificationChallenges.reference, reference))
+              .limit(1);
+            return row as ReassociationChallenge | undefined;
+          },
+          getAppLinks: async (befiterId) => {
+            const rows = await tx.select().from(appLinks)
+              .where(eq(appLinks.befiterId, befiterId));
+            return rows as ReassociationAppLink[];
+          },
+          findAppLinkByAppUserId: async (appName, appUserId) => {
+            const [row] = await tx.select().from(appLinks)
+              .where(and(
+                eq(appLinks.appName, appName),
+                eq(appLinks.appUserId, appUserId),
+              ))
+              .limit(1);
+            return row as ReassociationAppLink | undefined;
+          },
+          consumeChallenge: async (reference, consumedAt) => {
+            const [row] = await tx.update(contactVerificationChallenges)
+              .set({ consumedAt })
+              .where(and(
+                eq(contactVerificationChallenges.reference, reference),
+                isNull(contactVerificationChallenges.consumedAt),
+                isNull(contactVerificationChallenges.invalidatedAt),
+              ))
+              .returning({ id: contactVerificationChallenges.id });
+            return Boolean(row);
+          },
+          updateAppUserId: async (appLinkId, befiterId, appName, expectedAppUserId, newAppUserId) => {
+            const [row] = await tx.update(appLinks)
+              .set({ appUserId: newAppUserId })
+              .where(and(
+                eq(appLinks.id, appLinkId),
+                eq(appLinks.befiterId, befiterId),
+                eq(appLinks.appName, appName),
+                eq(appLinks.appUserId, expectedAppUserId),
+              ))
+              .returning({ id: appLinks.id });
+            return Boolean(row);
+          },
+          insertAudit: async (audit) => {
+            const [row] = await tx.insert(appLinkReassociations).values(audit).returning();
+            return row as AppLinkReassociation;
+          },
+          getIdentityWithLinks: async (befiterId) => {
+            const [identity] = await tx.select().from(befiterIds)
+              .where(eq(befiterIds.id, befiterId))
+              .limit(1);
+            if (!identity) return undefined;
+            const links = await tx.select().from(appLinks)
+              .where(eq(appLinks.befiterId, befiterId));
+            return serializeIdentity({ ...identity, appLinks: links }) as unknown as ReassociationIdentity;
+          },
+        };
+
+        return reassociateAppUserInTransaction(repository, input);
+      });
+    } catch (error) {
+      const pgError = error as { code?: string; constraint?: string };
+      if (pgError.code === "23505" && pgError.constraint === "app_links_app_user_uq") {
+        throw new ReassociationError(
+          "The new Social user ID is already associated with an identity",
+          409,
+          "APP_USER_ALREADY_LINKED",
+        );
+      }
+      if (pgError.code === "23505" && pgError.constraint === "app_link_reassociations_app_idempotency_uq") {
+        throw new ReassociationError(
+          "The idempotency key was already used",
+          409,
+          "IDEMPOTENCY_KEY_REUSED",
+        );
+      }
+      if (pgError.code === "23505" && pgError.constraint === "app_link_reassociations_attestation_ref_uq") {
+        throw new ReassociationError(
+          "This contact verification has already been used",
+          409,
+          "ATTESTATION_ALREADY_USED",
+        );
+      }
+      throw error;
+    }
   }
 
   async getContactVerification(

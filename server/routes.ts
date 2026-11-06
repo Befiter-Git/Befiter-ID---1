@@ -2,7 +2,27 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes, randomUUID } from "crypto";
-import { storage, ContactVerificationMismatchError, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor, quarantineEmailForApp, tolerantParse, scopeFitnessGoalsToApp } from "./storage";
+import {
+  storage,
+  ContactVerificationMismatchError,
+  ContactVerificationReferenceConflictError,
+  ContactVerificationReferenceUsedError,
+  EmailTakenError,
+  IdentityNotFoundError,
+  LeadNotFoundError,
+  extractMetadataBucket,
+  isValidEmail,
+  quarantineEmailFor,
+  quarantineEmailForApp,
+  tolerantParse,
+  scopeFitnessGoalsToApp,
+} from "./storage";
+import {
+  APP_USER_REASSOCIATION_TTL_MS,
+  isAuthorizedReassociationApp,
+  ReassociationError,
+  REASSOCIATION_APP_NAME,
+} from "./app-link-reassociation";
 import type { PatchBefiterId, UpdateBefiterId, InsertBefiterId } from "@shared/schema";
 import { retryWebhookNow, isChannelConfigured } from "./webhook-publisher";
 import { apiKeyAuth } from "./auth";
@@ -18,7 +38,38 @@ const contactVerificationRequestSchema = z.object({
   context: z.object({
     method: z.enum(["email_otp", "phone_otp"]),
     reference: z.string().trim().min(1).max(128).optional(),
+    purpose: z.literal("app_user_reassociation").optional(),
+    subjectAppUserId: z.string().trim().min(1).max(200).optional(),
   }).strict(),
+}).strict().superRefine((request, ctx) => {
+  const hasPurpose = request.context.purpose === "app_user_reassociation";
+  if (hasPurpose && (!request.context.reference || !request.context.subjectAppUserId)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Reassociation attestations require a unique reference and subjectAppUserId",
+      path: ["context"],
+    });
+  }
+  if (hasPurpose && (request.context.reference?.length ?? 0) < 32) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Reassociation references must contain at least 32 characters",
+      path: ["context", "reference"],
+    });
+  }
+  if (!hasPurpose && request.context.subjectAppUserId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "subjectAppUserId is only valid for reassociation attestations",
+      path: ["context", "subjectAppUserId"],
+    });
+  }
+});
+
+const reassociateAppUserRequestSchema = z.object({
+  expectedAppUserId: z.string().trim().min(1).max(200),
+  newAppUserId: z.string().trim().min(1).max(200),
+  attestationReference: z.string().trim().min(32).max(128),
 }).strict();
 
 async function resolveContactMatches(email?: string, normalizedPhone?: string) {
@@ -308,6 +359,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       const { contactType, context } = parsed.data;
+      if (
+        context.purpose === "app_user_reassociation"
+        && !isAuthorizedReassociationApp(req.appName)
+      ) {
+        return res.status(403).json({
+          error: "Only BeFiter.com may create reassociation attestations",
+          code: "APP_NOT_ALLOWED",
+        });
+      }
       if (context.method !== `${contactType}_otp`) {
         return res.status(422).json({
           error: "Verification method does not match contact type",
@@ -330,7 +390,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       try {
-        const verification = await storage.recordContactVerification({
+        const result = await storage.recordContactVerification({
           befiterId: req.params.befiterId as string,
           contactType,
           contactValue,
@@ -339,12 +399,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         });
         return res.status(201).json({
           contact_verification: {
-            contact_type: verification.contactType,
+            contact_type: result.verification.contactType,
             verified: true,
-            verified_by_app: verification.verifiedByApp,
-            verified_at: verification.verifiedAt.toISOString(),
-            context: verification.verificationContext,
+            verified_by_app: result.verification.verifiedByApp,
+            verified_at: result.verification.verifiedAt.toISOString(),
+            context: result.verification.verificationContext,
           },
+          ...(result.challenge ? {
+            reassociation_attestation: {
+              reference: result.challenge.reference,
+              purpose: result.challenge.purpose,
+              subject_app_user_id: result.challenge.subjectAppUserId,
+              verified_at: result.challenge.verifiedAt.toISOString(),
+              expires_at: new Date(
+                result.challenge.verifiedAt.getTime() + APP_USER_REASSOCIATION_TTL_MS,
+              ).toISOString(),
+            },
+          } : {}),
         });
       } catch (err) {
         if (err instanceof IdentityNotFoundError) {
@@ -353,8 +424,82 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         if (err instanceof ContactVerificationMismatchError) {
           return res.status(409).json({ error: "Contact does not match the current identity", code: "CONTACT_MISMATCH" });
         }
+        if (
+          err instanceof ContactVerificationReferenceConflictError
+          || err instanceof ContactVerificationReferenceUsedError
+        ) {
+          return res.status(409).json({ error: err.message, code: err.code });
+        }
         console.error(err);
         return res.status(500).json({ error: "Failed to record contact verification" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/identity/:befiterId/reassociate-app-user",
+    apiKeyAuth,
+    writeRateLimiter,
+    async (req: Request, res: Response) => {
+      if (!isAuthorizedReassociationApp(req.appName)) {
+        return res.status(403).json({
+          error: "Only the BeFiter.com application may reassociate its user link",
+          code: "APP_NOT_ALLOWED",
+        });
+      }
+      if (req.get("origin") || req.get("referer")) {
+        return res.status(403).json({
+          error: "Reassociation must be requested by an application backend",
+          code: "SERVER_TO_SERVER_ONLY",
+        });
+      }
+
+      const parsed = reassociateAppUserRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: "Invalid reassociation request",
+          code: "VALIDATION_FAILED",
+          details: parsed.error.flatten(),
+        });
+      }
+      const idempotencyKey = req.get("idempotency-key")?.trim();
+      if (
+        !idempotencyKey
+        || idempotencyKey.length < 8
+        || idempotencyKey.length > 128
+        || !/^[A-Za-z0-9._:-]+$/.test(idempotencyKey)
+      ) {
+        return res.status(400).json({
+          error: "A valid Idempotency-Key header is required",
+          code: "IDEMPOTENCY_KEY_REQUIRED",
+        });
+      }
+
+      try {
+        const result = await storage.reassociateAppUser({
+          befiterId: req.params.befiterId as string,
+          appName: req.appName!,
+          expectedAppUserId: parsed.data.expectedAppUserId,
+          newAppUserId: parsed.data.newAppUserId,
+          attestationReference: parsed.data.attestationReference,
+          idempotencyKey,
+        });
+        return res.json({
+          reassociated: true,
+          identity: result.identity,
+          reassociation: {
+            ...result.reassociation,
+            appName: REASSOCIATION_APP_NAME,
+            verifiedAt: result.reassociation.verifiedAt.toISOString(),
+            changedAt: result.reassociation.changedAt.toISOString(),
+          },
+        });
+      } catch (err) {
+        if (err instanceof ReassociationError) {
+          return res.status(err.status).json({ error: err.message, code: err.code });
+        }
+        console.error(err);
+        return res.status(500).json({ error: "Failed to reassociate Social account" });
       }
     },
   );
