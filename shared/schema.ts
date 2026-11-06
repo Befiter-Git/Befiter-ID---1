@@ -63,12 +63,14 @@ export const appLinks = pgTable("app_links", {
 
 export const apiKeys = pgTable("api_keys", {
   id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
-  appName: text("app_name").notNull().unique(),
+  appName: text("app_name").notNull(),
   keyHash: text("key_hash").notNull(),
   keyPrefix: text("key_prefix").notNull(),
   isActive: boolean("is_active").default(true),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  keyPrefixUnique: uniqueIndex("api_keys_key_prefix_uq").on(table.keyPrefix),
+}));
 
 export const identityUpdates = pgTable("identity_updates", {
   id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),

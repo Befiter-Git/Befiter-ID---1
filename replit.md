@@ -29,7 +29,8 @@ Centralised identity platform for the BeFiter ecosystem. Single source of truth 
 ## API Key Authentication
 
 - Keys stored as bcrypt hash + 10-char plain prefix
-- Validation: filter by prefix first → single bcrypt compare (O(1) not O(n))
+- Validation: filter by unique prefix first → single bcrypt compare (O(1) not O(n))
+- Multiple active keys may share an app name during rotation; revoke the previous key only after the replacement is verified
 - Rate limit: 100 req/min per API key via express-rate-limit
 
 ## REST API Endpoints

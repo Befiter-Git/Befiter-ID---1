@@ -230,8 +230,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       return res.status(201).json({ key: keyWithoutHash, rawKey });
     } catch (err: any) {
-      if (err?.code === "23505") {
-        return res.status(409).json({ error: "An API key for this app already exists" });
+      if (err?.code === "23505" && err?.constraint === "api_keys_key_prefix_uq") {
+        return res.status(409).json({ error: "Generated key prefix collision. Please try again." });
       }
       console.error(err);
       return res.status(500).json({ error: "Failed to create API key" });

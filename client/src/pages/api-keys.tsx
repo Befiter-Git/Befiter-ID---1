@@ -119,6 +119,9 @@ export default function ApiKeys() {
   return (
     <AdminLayout title="API Keys" subtitle="Manage API keys for connected BeFiter apps">
       <div className="space-y-4">
+        <p className="text-sm text-muted-foreground">
+          Keep the old key active while testing a replacement. Disable or delete it only after the new key works.
+        </p>
         <div className="flex justify-end">
           <Button onClick={() => setShowCreateModal(true)} data-testid="button-new-api-key">
             <Plus className="w-4 h-4 mr-2" /> Generate New Key
@@ -216,7 +219,9 @@ export default function ApiKeys() {
                   onChange={(e) => setNewAppName(e.target.value)}
                   data-testid="input-app-name"
                 />
-                <p className="text-xs text-muted-foreground">Free text — any value is allowed. Must be unique.</p>
+                <p className="text-xs text-muted-foreground">
+                  Use the exact app name. Multiple keys per app are allowed during rotation.
+                </p>
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={handleCloseModal} data-testid="button-cancel-create">Cancel</Button>
