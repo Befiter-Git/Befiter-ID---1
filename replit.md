@@ -24,6 +24,7 @@ Centralised identity platform for the BeFiter ecosystem. Single source of truth 
 | `api_keys` | Auth keys for connected apps (with keyPrefix for fast lookup) |
 | `identity_updates` | Audit log — one row per changed field |
 | `stats` | Persistent counters (duplicate_prevention_count) |
+| `contact_verifications` | App-scoped OTP attestations for exact current email/phone values |
 
 ## API Key Authentication
 
@@ -37,7 +38,8 @@ All require `x-api-key` header:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/identity/lookup` | Email-first lookup, returns `matched_by: "email"\|"phone"`, `linked: bool`, increments dup-prevention counter; pass `appUserId` to auto-link on the spot |
+| GET | `/api/identity/lookup` | Looks up email/phone, rejects conflicting matches, returns `matched_by`, `linked`, and caller-specific current-contact verification status; pass `appUserId` to auto-link on the spot |
+| POST | `/api/identity/:id/contact-verifications` | Server-to-server OTP attestation for an exact current email or phone; requires the caller's API key and records app/time/context |
 | POST | `/api/identity/create` | Smart upsert by email: 201 if new, 200 if existing; updates phone if changed |
 | PUT | `/api/identity/upsert` | Idempotent upsert: looks up by appUserId→email→phone→create; auto-links calling app on email/phone match; returns `matched_by` + identity; 201 on create, 200 on match |
 | PUT | `/api/identity/:id` | Partial update (currentPhone/email immutable) + audit log |
@@ -136,9 +138,9 @@ Whenever an identity is created, updated, or linked to an app, this service publ
 
 ## Key Business Rules
 
-1. **Email is the verified identifier** — email OTP is the login proof; always searched first in lookup
-2. **Phone is unverified** — only used for pre-fill, searched second in lookup
-3. **Lookup returns `matched_by`** — `"email"` or `"phone"` so caller knows confidence level
+1. **Contact text is not proof of verification** — only a caller-specific OTP attestation marks its exact current email or phone as verified
+2. **Lookup returns `contact_verification`** — separate email/phone status with verifier app and timestamp; `verified: false` means no active attestation for that exact current contact
+3. **Lookup rejects conflicting contacts** — if the supplied email and phone resolve to different identities, or the phone is ambiguous, it returns `409 CONTACT_MATCH_CONFLICT` without linking
 4. **Create is a smart upsert by email**:
    - Same email + same phone → 200, no changes
    - Same email + different phone → 200, archives old phone to `previous_phones`
@@ -148,6 +150,26 @@ Whenever an identity is created, updated, or linked to an app, this service publ
 7. **app_name is free text** — no hardcoded list, open for future products
 8. **Every field change logged** — one row per changed field in identity_updates
 9. **Duplicate prevention counter** — persisted in DB stats table
+
+## OTP Contact Attestations
+
+After an app's backend completes its own OTP flow, it may call:
+
+```http
+POST /api/identity/:befiterId/contact-verifications
+x-api-key: <server-side app key>
+Content-Type: application/json
+
+{
+  "contactType": "email",
+  "contactValue": "person@example.com",
+  "context": { "method": "email_otp" }
+}
+```
+
+Use `phone` with `phone_otp` for phone verification. Email is trimmed/lowercased and phone is normalized before the service checks it against the identity's current contact. A mismatch returns `409 CONTACT_MISMATCH`; browser-origin requests are rejected. The app identity is taken from the API key, never from the request body.
+
+Lookup returns `contact_verification.email` and `.phone`, each with `verified`, `verified_by_app`, and `verified_at`. Status is scoped to the calling app. Existing identities start unverified, and changing a contact invalidates its previous attestations. The API key must remain on the app backend; matching contact text or linking an app does not create verification status.
 
 ## Leads & Dashboard (Step 4)
 

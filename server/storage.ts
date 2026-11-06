@@ -1,16 +1,31 @@
-import { eq, ilike, or, and, sql, lte, desc, inArray } from "drizzle-orm";
+import { eq, ilike, or, and, sql, lte, desc, inArray, isNull } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { db } from "./db";
 import { wakeWebhookWorker } from "./webhook-worker-signal";
 import {
-  befiterIds, appLinks, apiKeys, identityUpdates, stats, leads, webhookEvents, adminAuditLog,
+  befiterIds, appLinks, apiKeys, identityUpdates, stats, leads, webhookEvents, contactVerifications, adminAuditLog,
   type BefiterId, type InsertBefiterId, type UpdateBefiterId, type PatchBefiterId,
   type AppLink, type ApiKey, type IdentityUpdate, type BefiterIdWithLinks,
   type Lead, type InsertLead, type PatchLead,
   type WebhookEvent, type WebhookDestination, type WebhookEventType,
+  type ContactVerification, type ContactVerificationType,
 } from "@shared/schema";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function invalidateContactVerificationsTx(
+  tx: Tx,
+  befiterId: string,
+  contactType: ContactVerificationType,
+): Promise<void> {
+  await tx.update(contactVerifications)
+    .set({ invalidatedAt: new Date() })
+    .where(and(
+      eq(contactVerifications.befiterId, befiterId),
+      eq(contactVerifications.contactType, contactType),
+      isNull(contactVerifications.invalidatedAt),
+    ));
+}
 
 async function transactionWithWebhookWake<T>(callback: (tx: Tx) => Promise<T>): Promise<T> {
   const result = await db.transaction(callback);
@@ -59,6 +74,11 @@ export class EmailTakenError extends Error {
 export class IdentityNotFoundError extends Error {
   code = "IDENTITY_NOT_FOUND" as const;
   constructor() { super("Identity not found"); }
+}
+
+export class ContactVerificationMismatchError extends Error {
+  code = "CONTACT_MISMATCH" as const;
+  constructor() { super("Contact does not match the current identity record"); }
 }
 
 export interface DashboardStats {
@@ -274,6 +294,7 @@ export interface CreateOrUpdateOptions {
 
 export interface IStorage {
   lookupByCurrentPhone(phone: string): Promise<BefiterId | undefined>;
+  lookupAllByCurrentPhone(phone: string): Promise<BefiterId[]>;
   lookupByEmail(email: string): Promise<BefiterId | undefined>;
   createOrUpdateIdentity(data: InsertBefiterId, appName: string, appUserId: string, opts?: CreateOrUpdateOptions): Promise<CreateOrUpdateResult>;
   updateIdentity(befiterId: string, data: UpdateBefiterId, appName: string): Promise<SerializedBefiterIdWithLinks>;
@@ -304,6 +325,19 @@ export interface IStorage {
   lookupByAppUserId(appName: string, appUserId: string): Promise<SerializedBefiterIdWithLinks | undefined>;
   ensureAppLink(befiterId: string, appName: string, appUserId: string): Promise<void>;
   createWebhookEvent(data: { eventId: string; eventType: string; destination: WebhookDestination; payload: string }): Promise<WebhookEvent>;
+  recordContactVerification(input: {
+    befiterId: string;
+    contactType: ContactVerificationType;
+    contactValue: string;
+    verifiedByApp: string;
+    verificationContext: ContactVerification["verificationContext"];
+  }): Promise<ContactVerification>;
+  getContactVerification(
+    befiterId: string,
+    contactType: ContactVerificationType,
+    contactValue: string,
+    verifiedByApp: string,
+  ): Promise<ContactVerification | undefined>;
   claimPendingWebhookEvents(limit: number): Promise<WebhookEvent[]>;
   getNextPendingWebhookAt(): Promise<Date | undefined>;
   markWebhookDelivered(id: string): Promise<void>;
@@ -319,6 +353,11 @@ export class DatabaseStorage implements IStorage {
       .where(eq(befiterIds.currentPhone, phone))
       .limit(1);
     return result;
+  }
+
+  async lookupAllByCurrentPhone(phone: string): Promise<BefiterId[]> {
+    return db.select().from(befiterIds)
+      .where(eq(befiterIds.currentPhone, phone));
   }
 
   async lookupByEmail(email: string): Promise<BefiterId | undefined> {
@@ -396,6 +435,9 @@ export class DatabaseStorage implements IStorage {
       await tx.update(befiterIds).set({
         email: e, rejectedEmailAtIntake: null, updatedAt: new Date(),
       }).where(eq(befiterIds.id, befiterId));
+      if (e !== existing.email) {
+        await invalidateContactVerificationsTx(tx, befiterId, "email");
+      }
       await tx.insert(adminAuditLog).values([{
         action: "identity.fix_email", befiterId, adminUsername,
         fieldChanged: "email", oldValue: existing.email, newValue: e,
@@ -446,6 +488,7 @@ export class DatabaseStorage implements IStorage {
             previousPhones: sql`array_append(${befiterIds.previousPhones}, ${oldPhone}::text)`,
             updatedAt: new Date(),
           }).where(eq(befiterIds.id, existingByEmail.id));
+          await invalidateContactVerificationsTx(tx, existingByEmail.id, "phone");
 
           auditEntries.push(
             { befiterId: existingByEmail.id, appName, fieldChanged: "currentPhone", oldValue: oldPhone, newValue: data.currentPhone },
@@ -603,6 +646,12 @@ export class DatabaseStorage implements IStorage {
       await tx.update(befiterIds)
         .set(dbUpdate)
         .where(eq(befiterIds.id, befiterId));
+      if (typeof dbUpdate.email === "string") {
+        await invalidateContactVerificationsTx(tx, befiterId, "email");
+      }
+      if (typeof dbUpdate.currentPhone === "string") {
+        await invalidateContactVerificationsTx(tx, befiterId, "phone");
+      }
     }
 
     if (Object.keys(metadata).length > 0) {
@@ -660,6 +709,12 @@ export class DatabaseStorage implements IStorage {
       await tx.update(befiterIds)
         .set({ ...updateData, updatedAt: new Date() })
         .where(eq(befiterIds.id, befiterId));
+      if (typeof updateData.email === "string" && updateData.email !== existing.email) {
+        await invalidateContactVerificationsTx(tx, befiterId, "email");
+      }
+      if (typeof updateData.currentPhone === "string" && updateData.currentPhone !== existing.currentPhone) {
+        await invalidateContactVerificationsTx(tx, befiterId, "phone");
+      }
 
       const [identityRow] = await tx.select().from(befiterIds).where(eq(befiterIds.id, befiterId)).limit(1);
       const links = await tx.select().from(appLinks).where(eq(appLinks.befiterId, befiterId));
@@ -1008,6 +1063,75 @@ export class DatabaseStorage implements IStorage {
     }).returning();
     wakeWebhookWorker();
     return row;
+  }
+
+  async recordContactVerification(input: {
+    befiterId: string;
+    contactType: ContactVerificationType;
+    contactValue: string;
+    verifiedByApp: string;
+    verificationContext: ContactVerification["verificationContext"];
+  }): Promise<ContactVerification> {
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT ${befiterIds.id}
+        FROM ${befiterIds}
+        WHERE ${befiterIds.id} = ${input.befiterId}
+        FOR UPDATE
+      `);
+      const [identity] = await tx.select().from(befiterIds)
+        .where(eq(befiterIds.id, input.befiterId))
+        .limit(1);
+      if (!identity) throw new IdentityNotFoundError();
+
+      const currentValue = input.contactType === "email"
+        ? identity.email.trim().toLowerCase()
+        : identity.currentPhone;
+      if (currentValue !== input.contactValue) {
+        throw new ContactVerificationMismatchError();
+      }
+
+      const [verification] = await tx.insert(contactVerifications).values({
+        befiterId: input.befiterId,
+        contactType: input.contactType,
+        contactValue: input.contactValue,
+        verifiedByApp: input.verifiedByApp,
+        verificationContext: input.verificationContext,
+        verifiedAt: new Date(),
+        invalidatedAt: null,
+      }).onConflictDoUpdate({
+        target: [
+          contactVerifications.befiterId,
+          contactVerifications.contactType,
+          contactVerifications.verifiedByApp,
+          contactVerifications.contactValue,
+        ],
+        set: {
+          verificationContext: input.verificationContext,
+          verifiedAt: new Date(),
+          invalidatedAt: null,
+        },
+      }).returning();
+      return verification;
+    });
+  }
+
+  async getContactVerification(
+    befiterId: string,
+    contactType: ContactVerificationType,
+    contactValue: string,
+    verifiedByApp: string,
+  ): Promise<ContactVerification | undefined> {
+    const [verification] = await db.select().from(contactVerifications)
+      .where(and(
+        eq(contactVerifications.befiterId, befiterId),
+        eq(contactVerifications.contactType, contactType),
+        eq(contactVerifications.contactValue, contactValue),
+        eq(contactVerifications.verifiedByApp, verifiedByApp),
+        isNull(contactVerifications.invalidatedAt),
+      ))
+      .limit(1);
+    return verification;
   }
 
   async claimPendingWebhookEvents(limit: number): Promise<WebhookEvent[]> {

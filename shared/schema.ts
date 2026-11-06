@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, boolean, timestamp, date, numeric, integer, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, boolean, timestamp, date, numeric, integer, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -306,9 +306,29 @@ export const webhookEvents = pgTable("webhook_events", {
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
+export const contactVerifications = pgTable("contact_verifications", {
+  id: varchar("id", { length: 50 }).primaryKey().default(sql`gen_random_uuid()`),
+  befiterId: varchar("befiter_id", { length: 50 }).notNull()
+    .references(() => befiterIds.id, { onDelete: "cascade" }),
+  contactType: text("contact_type").notNull(),
+  contactValue: text("contact_value").notNull(),
+  verifiedByApp: text("verified_by_app").notNull(),
+  verificationContext: jsonb("verification_context")
+    .$type<{ method: "email_otp" | "phone_otp"; reference?: string }>()
+    .notNull()
+    .default(sql`'{}'::jsonb`),
+  verifiedAt: timestamp("verified_at").notNull().defaultNow(),
+  invalidatedAt: timestamp("invalidated_at"),
+}, (table) => ({
+  identityTypeAppValueUnique: uniqueIndex("contact_verifications_identity_type_app_value_uq")
+    .on(table.befiterId, table.contactType, table.verifiedByApp, table.contactValue),
+}));
+
 export type AdminAuditLog = typeof adminAuditLog.$inferSelect;
 
 export type WebhookEvent = typeof webhookEvents.$inferSelect;
+export type ContactVerification = typeof contactVerifications.$inferSelect;
+export type ContactVerificationType = "email" | "phone";
 export type WebhookStatus = "pending" | "success" | "failed" | "dead";
 export type WebhookDestination = "com" | "store";
 export type WebhookEventType =

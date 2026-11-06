@@ -1,0 +1,1 @@
+- [Contact verification trust](contact-verification-trust.md) — Keep OTP proof scoped to the app that performed it and to the exact current contact value.

@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
 import { randomBytes, randomUUID } from "crypto";
-import { storage, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor, quarantineEmailForApp, tolerantParse, scopeFitnessGoalsToApp } from "./storage";
+import { storage, ContactVerificationMismatchError, EmailTakenError, IdentityNotFoundError, LeadNotFoundError, extractMetadataBucket, isValidEmail, quarantineEmailFor, quarantineEmailForApp, tolerantParse, scopeFitnessGoalsToApp } from "./storage";
 import type { PatchBefiterId, UpdateBefiterId, InsertBefiterId } from "@shared/schema";
 import { retryWebhookNow, isChannelConfigured } from "./webhook-publisher";
 import { apiKeyAuth } from "./auth";
@@ -10,6 +10,40 @@ import { requireAdminSession, sessionMiddleware } from "./admin-auth";
 import { readRateLimiter, writeRateLimiter, adminLoginLimiter, apiError } from "./security";
 import { normalisePhone } from "./phone-utils";
 import { insertBefiterIdSchema, updateBefiterIdSchema, patchBefiterIdSchema, upsertBefiterIdSchema, insertLeadSchema, patchLeadSchema } from "@shared/schema";
+import { z } from "zod";
+
+const contactVerificationRequestSchema = z.object({
+  contactType: z.enum(["email", "phone"]),
+  contactValue: z.string().trim().min(1).max(254),
+  context: z.object({
+    method: z.enum(["email_otp", "phone_otp"]),
+    reference: z.string().trim().min(1).max(128).optional(),
+  }).strict(),
+}).strict();
+
+async function resolveContactMatches(email?: string, normalizedPhone?: string) {
+  const [emailIdentity, phoneMatches] = await Promise.all([
+    email ? storage.lookupByEmail(email.trim().toLowerCase()) : Promise.resolve(undefined),
+    normalizedPhone ? storage.lookupAllByCurrentPhone(normalizedPhone) : Promise.resolve([]),
+  ]);
+  const conflict = phoneMatches.length > 1
+    || Boolean(emailIdentity && phoneMatches.some((identity) => identity.id !== emailIdentity.id));
+  const identity = emailIdentity ?? (phoneMatches.length === 1 ? phoneMatches[0] : undefined);
+  return {
+    emailIdentity,
+    phoneMatches,
+    identity,
+    matchedBy: emailIdentity ? "email" as const : identity ? "phone" as const : undefined,
+    conflict,
+  };
+}
+
+function contactMatchConflict(res: Response) {
+  return res.status(409).json({
+    error: "The supplied email and phone do not identify one unambiguous identity",
+    code: "CONTACT_MATCH_CONFLICT",
+  });
+}
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   app.use(sessionMiddleware);
@@ -180,31 +214,29 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ─── Public API Identity Routes ───────────────────────────────────────────
 
-  // Lookup: email first (verified via OTP), then phone (unverified — pre-fill only)
+  // Match supplied contacts, reject cross-identity ambiguity, and report only this app's OTP attestations.
   app.get("/api/identity/lookup", apiKeyAuth, readRateLimiter, async (req: Request, res: Response) => {
     try {
-      const { phone, email } = req.query as { phone?: string; email?: string };
+      const phone = typeof req.query.phone === "string" ? req.query.phone : undefined;
+      const email = typeof req.query.email === "string" ? req.query.email : undefined;
 
       if (!phone && !email) {
         return res.status(400).json({ error: "At least one of phone or email is required" });
       }
 
-      let identity = undefined;
-      let matchedBy: "email" | "phone" | undefined;
-
-      // Email is searched FIRST — it is the verified login identifier (email OTP)
-      if (email) {
-        identity = await storage.lookupByEmail(email);
-        if (identity) matchedBy = "email";
+      let normalizedPhone: string | undefined;
+      if (phone) {
+        try {
+          normalizedPhone = normalisePhone(phone);
+        } catch {
+          return res.status(422).json({ error: "Invalid phone number", code: "INVALID_CONTACT" });
+        }
       }
+      const matches = await resolveContactMatches(email, normalizedPhone);
+      if (matches.conflict) return contactMatchConflict(res);
 
-      // Phone is searched SECOND only if email did not find anything
-      // Phone is unverified — result should be used for pre-fill only, not as confirmed identity
-      if (!identity && phone) {
-        const normalised = normalisePhone(phone);
-        identity = await storage.lookupByCurrentPhone(normalised);
-        if (identity) matchedBy = "phone";
-      }
+      const identity = matches.identity;
+      const matchedBy = matches.matchedBy;
 
       if (identity) {
         const appUserId = (req.query.appUserId as string | undefined)?.trim();
@@ -215,10 +247,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
         await storage.incrementDuplicatePrevention();
         const fullIdentity = await storage.getIdentity(identity.id);
+        const [emailVerification, phoneVerification] = fullIdentity
+          ? await Promise.all([
+            storage.getContactVerification(
+              identity.id, "email", fullIdentity.email.trim().toLowerCase(), req.appName!,
+            ),
+            storage.getContactVerification(
+              identity.id, "phone", fullIdentity.currentPhone, req.appName!,
+            ),
+          ])
+          : [undefined, undefined];
         return res.json({
           found: true,
           matched_by: matchedBy,
           linked,
+          contact_verification: {
+            email: {
+              verified: Boolean(emailVerification),
+              verified_by_app: emailVerification?.verifiedByApp ?? null,
+              verified_at: emailVerification?.verifiedAt?.toISOString() ?? null,
+            },
+            phone: {
+              verified: Boolean(phoneVerification),
+              verified_by_app: phoneVerification?.verifiedByApp ?? null,
+              verified_at: phoneVerification?.verifiedAt?.toISOString() ?? null,
+            },
+          },
           identity: fullIdentity ? scopeFitnessGoalsToApp(fullIdentity, req.appName!) : fullIdentity,
         });
       }
@@ -229,6 +283,81 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return res.status(500).json({ error: "Lookup failed" });
     }
   });
+
+  app.post(
+    "/api/identity/:befiterId/contact-verifications",
+    apiKeyAuth,
+    writeRateLimiter,
+    async (req: Request, res: Response) => {
+      // A browser request is never a trusted OTP-verification attestation.
+      // The application's API key must remain on its backend.
+      if (req.get("origin") || req.get("referer")) {
+        return res.status(403).json({
+          error: "Contact verification attestations must come from an application backend",
+          code: "SERVER_TO_SERVER_ONLY",
+        });
+      }
+
+      const parsed = contactVerificationRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: "Invalid contact verification request",
+          code: "VALIDATION_FAILED",
+          details: parsed.error.flatten(),
+        });
+      }
+
+      const { contactType, context } = parsed.data;
+      if (context.method !== `${contactType}_otp`) {
+        return res.status(422).json({
+          error: "Verification method does not match contact type",
+          code: "VERIFICATION_METHOD_MISMATCH",
+        });
+      }
+
+      let contactValue: string;
+      if (contactType === "email") {
+        contactValue = parsed.data.contactValue.toLowerCase();
+        if (!isValidEmail(contactValue)) {
+          return res.status(422).json({ error: "Invalid email address", code: "INVALID_CONTACT" });
+        }
+      } else {
+        try {
+          contactValue = normalisePhone(parsed.data.contactValue);
+        } catch {
+          return res.status(422).json({ error: "Invalid phone number", code: "INVALID_CONTACT" });
+        }
+      }
+
+      try {
+        const verification = await storage.recordContactVerification({
+          befiterId: req.params.befiterId as string,
+          contactType,
+          contactValue,
+          verifiedByApp: req.appName!,
+          verificationContext: context,
+        });
+        return res.status(201).json({
+          contact_verification: {
+            contact_type: verification.contactType,
+            verified: true,
+            verified_by_app: verification.verifiedByApp,
+            verified_at: verification.verifiedAt.toISOString(),
+            context: verification.verificationContext,
+          },
+        });
+      } catch (err) {
+        if (err instanceof IdentityNotFoundError) {
+          return res.status(404).json({ error: "Identity not found", code: "IDENTITY_NOT_FOUND" });
+        }
+        if (err instanceof ContactVerificationMismatchError) {
+          return res.status(409).json({ error: "Contact does not match the current identity", code: "CONTACT_MISMATCH" });
+        }
+        console.error(err);
+        return res.status(500).json({ error: "Failed to record contact verification" });
+      }
+    },
+  );
 
   // Create: smart upsert by email
   // Email exists + same phone   → return existing, link app (200)
@@ -316,6 +445,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
       for (const f of parsed.dropped) warnings.push(`field_dropped:${f}`);
 
+      const matches = await resolveContactMatches(
+        parsed.data.email,
+        normalisedPhone ?? undefined,
+      );
+      if (matches.conflict) return contactMatchConflict(res);
+
       const result = await storage.createOrUpdateIdentity(
         parsed.data as InsertBefiterId, req.appName!, appUserId,
         { metadata, rejectedEmailAtIntake: rejectedEmail },
@@ -388,7 +523,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       for (const f of parseProfile.dropped) warnings.push(`field_dropped:${f}`);
       const normalisedProfileData: PatchBefiterId = parseProfile.data as PatchBefiterId;
 
+      const contactMatches = await resolveContactMatches(
+        typeof normalisedProfileData.email === "string" ? normalisedProfileData.email : undefined,
+        typeof normalisedProfileData.phone === "string" ? normalisedProfileData.phone : undefined,
+      );
+      if (contactMatches.conflict) return contactMatchConflict(res);
+
       const byAppUserId = await storage.lookupByAppUserId(appName, appUserId);
+      if (
+        byAppUserId
+        && contactMatches.identity
+        && contactMatches.identity.id !== byAppUserId.id
+      ) {
+        return contactMatchConflict(res);
+      }
       if (byAppUserId) {
         if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
           await storage.patchIdentity(byAppUserId.id, normalisedProfileData, appName, { metadata });
@@ -398,7 +546,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       if (typeof normalisedProfileData.email === "string") {
-        const byEmail = await storage.lookupByEmail(normalisedProfileData.email);
+        const byEmail = contactMatches.emailIdentity;
         if (byEmail) {
           await storage.ensureAppLink(byEmail.id, appName, appUserId);
           if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
@@ -410,7 +558,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       if (typeof normalisedProfileData.phone === "string") {
-        const byPhone = await storage.lookupByCurrentPhone(normalisedProfileData.phone);
+        const byPhone = contactMatches.phoneMatches[0];
         if (byPhone) {
           await storage.ensureAppLink(byPhone.id, appName, appUserId);
           if (Object.keys(normalisedProfileData).length > 0 || Object.keys(metadata).length > 0) {
@@ -589,19 +737,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!appUserId) {
         return res.status(400).json({ error: "appUserId is required" });
       }
-      if (!email || !phone) {
-        return res.status(400).json({ error: "email and phone are required to verify identity ownership" });
+      if (typeof email !== "string" || typeof phone !== "string" || !email.trim() || !phone.trim()) {
+        return res.status(400).json({ error: "email and phone are required to match the current identity" });
       }
-      if (!existing.email || email.toLowerCase() !== existing.email.toLowerCase()) {
-        return res.status(403).json({ error: "Forbidden - provided credentials do not match identity record" });
-      }
-      let normalisedLinkPhone: string;
+      const normalizedEmail = email.trim().toLowerCase();
+      let normalizedLinkPhone: string;
       try {
-        normalisedLinkPhone = normalisePhone(phone);
+        normalizedLinkPhone = normalisePhone(phone);
       } catch {
         return res.status(422).json({ error: "Invalid phone number" });
       }
-      if (normalisedLinkPhone !== existing.currentPhone) {
+
+      const matches = await resolveContactMatches(normalizedEmail, normalizedLinkPhone);
+      if (
+        matches.conflict
+        || (matches.emailIdentity && matches.emailIdentity.id !== existing.id)
+        || matches.phoneMatches.some((identity) => identity.id !== existing.id)
+      ) {
+        return contactMatchConflict(res);
+      }
+
+      if (!existing.email || normalizedEmail !== existing.email.toLowerCase()) {
+        return res.status(403).json({ error: "Forbidden - provided credentials do not match identity record" });
+      }
+      if (normalizedLinkPhone !== existing.currentPhone) {
         return res.status(403).json({ error: "Forbidden - provided credentials do not match identity record" });
       }
 
